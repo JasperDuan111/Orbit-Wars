@@ -84,7 +84,7 @@ class OpponentPool:
 
     def sample(self):
         if not self.snapshots:
-            return NearestPlanetOpponent()
+            return random.choice([NearestPlanetOpponent(), RandomOpponent()])
         state_dict = random.choice(self.snapshots)
         policy = self.policy_factory().to(self.device)
         policy.load_state_dict(state_dict)

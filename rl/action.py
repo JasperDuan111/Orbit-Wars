@@ -40,7 +40,6 @@ class ActionBuilder:
 
         for i in range(MAX_SOURCES):
             source_actions: List[Optional[ActionTemplate]] = [None] * self.actions_per_source
-            source_actions[0] = None
 
             if i >= len(my_planets):
                 actions.append(source_actions)
@@ -220,8 +219,8 @@ def logprob_for_action_sequence(
 def _ships_to_send(remaining_ships: int, fraction: float) -> int:
     if remaining_ships <= 0:
         return 0
-    ships = int(math.ceil(remaining_ships * float(fraction)))
-    return max(0, min(ships, remaining_ships))
+    ships = int(remaining_ships * float(fraction))
+    return max(1, min(ships, remaining_ships))
 
 
 def _mask_tensor(

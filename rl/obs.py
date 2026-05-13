@@ -56,7 +56,13 @@ def encode_observation(obs, max_planets=MAX_PLANETS, max_fleets=MAX_FLEETS):
     planet_features = np.zeros((max_planets, PLANET_FEATURES), dtype=np.float32)
     fleet_features = np.zeros((max_fleets, FLEET_FEATURES), dtype=np.float32)
 
-    for idx, p in enumerate(sorted(planets, key=lambda item: item.id)[:max_planets]):
+    def _planet_sort_key(p):
+        is_me = 1 if p.owner == player_id else 0
+        is_enemy = 1 if (p.owner != player_id and p.owner != -1) else 0
+        dist = math.hypot(p.x - CENTER_X, p.y - CENTER_Y)
+        return (-is_me, -is_enemy, dist)
+
+    for idx, p in enumerate(sorted(planets, key=_planet_sort_key)[:max_planets]):
         is_me = 1.0 if p.owner == player_id else 0.0
         is_neutral = 1.0 if p.owner == -1 else 0.0
         is_enemy = 1.0 if (p.owner != player_id and p.owner != -1) else 0.0

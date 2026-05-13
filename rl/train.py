@@ -5,7 +5,7 @@ import numpy as np
 import torch
 from torch.utils.tensorboard import SummaryWriter
 
-from .action import ActionBuilder, sample_action_sequence
+from .action import sample_action_sequence
 from .config import ACTIONS_PER_SOURCE, MAX_SOURCES, OBS_DIM, PPOConfig
 from .envs.orbit_wars_env import OrbitWarsSelfPlayEnv
 from .models import ActorCritic
@@ -86,7 +86,6 @@ def main():
         env.set_opponent(pool.sample())
 
     obs_list = [env.reset() for env in envs]
-    action_builder = ActionBuilder()
 
     try:
         for update in range(1, config.total_updates + 1):
@@ -112,7 +111,8 @@ def main():
                 obs_snapshots = []
 
                 for i, env in enumerate(envs):
-                    action_templates, source_ships = action_builder.build(obs_list[i])
+                    action_templates = env.last_actions
+                    source_ships = env.last_source_ships
                     action_indices, logprob, _ = sample_action_sequence(
                         logits_batch[i],
                         action_templates,

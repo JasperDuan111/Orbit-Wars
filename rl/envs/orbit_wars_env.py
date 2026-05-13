@@ -33,8 +33,6 @@ class OrbitWarsSelfPlayEnv:
         self._env = make("orbit_wars", configuration=configuration, debug=debug)
         self.num_players = num_players
         self.player_index = 0
-        self.opponent_index = 1 if num_players > 1 else 0
-        self._opponent = opponent or NearestPlanetOpponent()
         self._action_builder = ActionBuilder()
         self._last_actions = None
         self._last_source_ships = None
@@ -44,8 +42,27 @@ class OrbitWarsSelfPlayEnv:
         self.terminal_reward_scale = terminal_reward_scale
         self.max_launches_per_source = max_launches_per_source
 
-    def set_opponent(self, opponent):
-        self._opponent = opponent or NearestPlanetOpponent()
+        opponent = opponent or NearestPlanetOpponent()
+        if not isinstance(opponent, list):
+            opponent = [opponent] * (num_players - 1)
+        self._opponents = opponent
+
+    @property
+    def last_actions(self):
+        return self._last_actions
+
+    @property
+    def last_source_ships(self):
+        return self._last_source_ships
+
+    def set_opponent(self, opponent, index=None):
+        if index is not None:
+            while len(self._opponents) <= index:
+                self._opponents.append(NearestPlanetOpponent())
+            self._opponents[index] = opponent or NearestPlanetOpponent()
+        else:
+            opponent = opponent or NearestPlanetOpponent()
+            self._opponents = [opponent] * (self.num_players - 1)
 
     def reset(self):
         try:
@@ -68,13 +85,21 @@ class OrbitWarsSelfPlayEnv:
             self._last_source_ships,
             self.max_launches_per_source,
         )
-        my_action, invalid = self._sanitize_action(my_action, obs, player_id)
+        my_action, invalid_count = self._sanitize_action(my_action, obs, player_id)
 
-        opp_obs = self._get_obs(self.opponent_index)
-        opp_action = self._opponent.act(opp_obs) if self._opponent else []
-        if opp_action is None:
-            opp_action = []
-        self._env.step([my_action, opp_action])
+        actions = [None] * self.num_players
+        actions[self.player_index] = my_action
+        for opp_idx in range(self.num_players):
+            if opp_idx == self.player_index:
+                continue
+            opp_obs = self._get_obs(opp_idx)
+            opp_idx_in_list = opp_idx - 1 if opp_idx > self.player_index else opp_idx
+            if opp_idx_in_list < len(self._opponents):
+                opp_action = self._opponents[opp_idx_in_list].act(opp_obs)
+                actions[opp_idx] = opp_action if opp_action else []
+            else:
+                actions[opp_idx] = []
+        self._env.step(actions)
 
         obs = self._get_obs(self.player_index)
         my_total, enemy_total = ship_totals(obs, player_id)
@@ -90,10 +115,10 @@ class OrbitWarsSelfPlayEnv:
             "my_total": my_total,
             "enemy_total": enemy_total,
             "diff": diff,
-            "invalid_action": invalid,
+            "invalid_count": invalid_count,
         }
-        if invalid:
-            reward -= self.invalid_action_penalty
+        if invalid_count > 0:
+            reward -= self.invalid_action_penalty * invalid_count
         return obs, reward, done, info
 
     def _get_obs(self, index):
@@ -106,31 +131,36 @@ class OrbitWarsSelfPlayEnv:
 
     def _sanitize_action(self, action, obs, player_id):
         if not action:
-            return [], False
+            return [], 0
         if not isinstance(action, list):
-            return [], True
+            return [], len(action) if hasattr(action, '__len__') else 1
 
         raw_planets = obs.get("planets", []) if isinstance(obs, dict) else obs.planets
         planets = [Planet(*p) for p in raw_planets]
         ships_by_id = {p.id: p.ships for p in planets if p.owner == player_id}
         used = {}
+        invalid_count = 0
 
         clean = []
         for move in action:
             if not isinstance(move, (list, tuple)) or len(move) != 3:
-                return [], True
+                invalid_count += 1
+                continue
             from_id, angle, ships = move
             try:
                 from_id = int(from_id)
                 ships = int(ships)
             except (TypeError, ValueError):
-                return [], True
+                invalid_count += 1
+                continue
             if from_id not in ships_by_id:
-                return [], True
+                invalid_count += 1
+                continue
             remaining = ships_by_id[from_id] - used.get(from_id, 0)
             if ships < 1 or ships > remaining:
-                return [], True
+                invalid_count += 1
+                continue
             used[from_id] = used.get(from_id, 0) + ships
             clean.append([from_id, float(angle), ships])
 
-        return clean, False
+        return clean, invalid_count
