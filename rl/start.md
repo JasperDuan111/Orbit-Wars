@@ -339,7 +339,6 @@ OpponentPool.add(state_dict)  ← 定期加入对手池
 ### 6.1 训练优化
 - **调整超参数**：修改 `PPOConfig` 中的参数（如增大 `rollout_steps`、调整 `ent_coef`）
 - **增大模型**：修改 `MODEL_HIDDEN_SIZES`，增加层数或宽度
-- **多 GPU 支持**：当前只支持单 GPU，可扩展到 DistributedDataParallel
 - **学习率调度**：当前是固定 lr，可加入 cosine annealing 或 linear decay
 
 ### 6.2 观测与特征
