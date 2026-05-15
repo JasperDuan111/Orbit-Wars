@@ -10,9 +10,10 @@ Key points:
 - Deeper MLP policy/value network
 - Discrete action space: per-source multi-launch sequences (stop or target+fraction)
 
-Conda: 
+Conda virtual environment: 
 ```bash
 conda create -n OrbitWars python=3.11
+conda activate OrbitWars
 ```
 
 Install dependencies:
@@ -21,10 +22,14 @@ Install dependencies:
 pip install "kaggle-environments>=1.28.0" torch numpy tensorboard
 ```
 
+Train:
+```bash
+python -m rl.train --log-dir runs/orbit_wars
+```
+
 TensorBoard:
 
 ```bash
-python -m rl.train --log-dir runs/orbit_wars
 tensorboard --logdir runs/orbit_wars
 ```
 
