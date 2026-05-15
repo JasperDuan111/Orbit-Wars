@@ -10,6 +10,11 @@ Key points:
 - Deeper MLP policy/value network
 - Discrete action space: per-source multi-launch sequences (stop or target+fraction)
 
+Conda: 
+```bash
+conda create -n OrbitWars python=3.11
+```
+
 Install dependencies:
 
 ```bash
