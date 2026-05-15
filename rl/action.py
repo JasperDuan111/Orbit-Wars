@@ -5,13 +5,7 @@ from typing import List, Optional, Sequence, Tuple
 import torch
 from torch.distributions import Categorical
 from kaggle_environments.envs.orbit_wars.orbit_wars import Planet
-from .config import (
-    ACTIONS_PER_SOURCE,
-    MAX_LAUNCHES_PER_SOURCE,
-    MAX_SOURCES,
-    MAX_TARGETS,
-    SHIP_FRACTIONS,
-)
+from .config import ActionSpaceConfig, DEFAULT_CONFIG
 
 
 def _get_field(obs, name, default=None):
@@ -26,8 +20,10 @@ def _parse_planets(obs):
 
 
 class ActionBuilder:
-    def __init__(self):
-        self.actions_per_source = ACTIONS_PER_SOURCE
+    def __init__(self, action_config: Optional[ActionSpaceConfig] = None):
+        self.config = action_config or DEFAULT_CONFIG.action
+        self.actions_per_source = self.config.actions_per_source
+        self.max_sources = self.config.max_sources
 
     def build(self, obs):
         player_id = _get_field(obs, "player", 0)
@@ -38,7 +34,7 @@ class ActionBuilder:
         actions: List[List[Optional[ActionTemplate]]] = []
         source_ships: List[int] = []
 
-        for i in range(MAX_SOURCES):
+        for i in range(self.max_sources):
             source_actions: List[Optional[ActionTemplate]] = [None] * self.actions_per_source
 
             if i >= len(my_planets):
@@ -62,13 +58,13 @@ class ActionBuilder:
                 continue
 
             idx = 1
-            for j in range(MAX_TARGETS):
+            for j in range(self.config.max_targets):
                 if j >= len(ordered_targets):
-                    idx += len(SHIP_FRACTIONS)
+                    idx += len(self.config.ship_fractions)
                     continue
                 tgt = ordered_targets[j]
                 angle = math.atan2(tgt.y - src.y, tgt.x - src.x)
-                for frac in SHIP_FRACTIONS:
+                for frac in self.config.ship_fractions:
                     source_actions[idx] = ActionTemplate(src.id, angle, float(frac))
                     idx += 1
 
@@ -81,15 +77,18 @@ class ActionBuilder:
         action_indices,
         actions: Sequence[Sequence[Optional["ActionTemplate"]]],
         source_ships: Sequence[int],
-        max_launches: int = MAX_LAUNCHES_PER_SOURCE,
+        max_launches: Optional[int] = None,
     ):
         if action_indices is None:
             return []
         if hasattr(action_indices, "tolist"):
             action_indices = action_indices.tolist()
 
+        if max_launches is None:
+            max_launches = self.config.max_launches_per_source
+
         moves = []
-        for src_idx in range(min(len(actions), MAX_SOURCES)):
+        for src_idx in range(min(len(actions), self.max_sources)):
             remaining = int(source_ships[src_idx]) if src_idx < len(source_ships) else 0
             if remaining <= 0:
                 continue
@@ -128,17 +127,21 @@ def sample_action_sequence(
     logits: torch.Tensor,
     actions: Sequence[Sequence[Optional[ActionTemplate]]],
     source_ships: Sequence[int],
-    max_launches: int = MAX_LAUNCHES_PER_SOURCE,
+    max_launches: Optional[int] = None,
     deterministic: bool = False,
+    action_config: Optional[ActionSpaceConfig] = None,
 ):
     device = logits.device
+    config = action_config or DEFAULT_CONFIG.action
+    if max_launches is None:
+        max_launches = config.max_launches_per_source
     action_indices = torch.zeros(
-        (MAX_SOURCES, max_launches), dtype=torch.long, device=device
+        (config.max_sources, max_launches), dtype=torch.long, device=device
     )
     logprob_sum = torch.zeros((), device=device)
     entropy_sum = torch.zeros((), device=device)
 
-    for src_idx in range(min(MAX_SOURCES, len(actions))):
+    for src_idx in range(min(config.max_sources, len(actions))):
         remaining = int(source_ships[src_idx]) if src_idx < len(source_ships) else 0
         if remaining <= 0:
             continue
@@ -176,16 +179,20 @@ def logprob_for_action_sequence(
     actions: Sequence[Sequence[Optional[ActionTemplate]]],
     source_ships: Sequence[int],
     action_indices: torch.Tensor,
-    max_launches: int = MAX_LAUNCHES_PER_SOURCE,
+    max_launches: Optional[int] = None,
+    action_config: Optional[ActionSpaceConfig] = None,
 ):
     device = logits.device
+    config = action_config or DEFAULT_CONFIG.action
+    if max_launches is None:
+        max_launches = config.max_launches_per_source
     logprob_sum = torch.zeros((), device=device)
     entropy_sum = torch.zeros((), device=device)
 
     if hasattr(action_indices, "to"):
         action_indices = action_indices.to(device)
 
-    for src_idx in range(min(MAX_SOURCES, len(actions))):
+    for src_idx in range(min(config.max_sources, len(actions))):
         remaining = int(source_ships[src_idx]) if src_idx < len(source_ships) else 0
         if remaining <= 0:
             continue
@@ -228,7 +235,7 @@ def _mask_tensor(
     remaining_ships: int,
     device: torch.device,
 ) -> torch.Tensor:
-    mask = torch.zeros((ACTIONS_PER_SOURCE,), dtype=torch.float32, device=device)
+    mask = torch.zeros((len(source_actions),), dtype=torch.float32, device=device)
     mask[0] = 1.0
     if remaining_ships <= 0:
         return mask

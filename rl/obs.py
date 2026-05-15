@@ -1,16 +1,9 @@
 import math
+from typing import Optional
+
 import numpy as np
 from kaggle_environments.envs.orbit_wars.orbit_wars import Planet, Fleet
-from .config import (
-    BOARD_SIZE,
-    CENTER_X,
-    CENTER_Y,
-    MAX_PLANETS,
-    MAX_FLEETS,
-    PLANET_FEATURES,
-    FLEET_FEATURES,
-    GLOBAL_FEATURES,
-)
+from .config import DEFAULT_CONFIG, GameConfig, ObsConfig
 
 
 def _get_field(obs, name, default=None):
@@ -48,31 +41,43 @@ def ship_totals(obs, player_id):
     return my_total, enemy_total
 
 
-def encode_observation(obs, max_planets=MAX_PLANETS, max_fleets=MAX_FLEETS):
+def encode_observation(
+    obs,
+    max_planets: Optional[int] = None,
+    max_fleets: Optional[int] = None,
+    obs_config: Optional[ObsConfig] = None,
+    game_config: Optional[GameConfig] = None,
+):
+    obs_config = obs_config or DEFAULT_CONFIG.obs
+    game_config = game_config or DEFAULT_CONFIG.game
+    if max_planets is None:
+        max_planets = obs_config.max_planets
+    if max_fleets is None:
+        max_fleets = obs_config.max_fleets
     player_id = _get_field(obs, "player", 0)
     planets, fleets = parse_entities(obs)
     comet_ids = set(_get_field(obs, "comet_planet_ids", []))
 
-    planet_features = np.zeros((max_planets, PLANET_FEATURES), dtype=np.float32)
-    fleet_features = np.zeros((max_fleets, FLEET_FEATURES), dtype=np.float32)
+    planet_features = np.zeros((max_planets, obs_config.planet_features), dtype=np.float32)
+    fleet_features = np.zeros((max_fleets, obs_config.fleet_features), dtype=np.float32)
 
     def _planet_sort_key(p):
         is_me = 1 if p.owner == player_id else 0
         is_enemy = 1 if (p.owner != player_id and p.owner != -1) else 0
-        dist = math.hypot(p.x - CENTER_X, p.y - CENTER_Y)
+        dist = math.hypot(p.x - game_config.center_x, p.y - game_config.center_y)
         return (-is_me, -is_enemy, dist)
 
     for idx, p in enumerate(sorted(planets, key=_planet_sort_key)[:max_planets]):
         is_me = 1.0 if p.owner == player_id else 0.0
         is_neutral = 1.0 if p.owner == -1 else 0.0
         is_enemy = 1.0 if (p.owner != player_id and p.owner != -1) else 0.0
-        x_norm = p.x / BOARD_SIZE
-        y_norm = p.y / BOARD_SIZE
+        x_norm = p.x / game_config.board_size
+        y_norm = p.y / game_config.board_size
         radius_norm = p.radius / 10.0
         ships_norm = _log_scale(p.ships)
         production_norm = p.production / 5.0
         is_comet = 1.0 if p.id in comet_ids else 0.0
-        dist = math.hypot(p.x - CENTER_X, p.y - CENTER_Y)
+        dist = math.hypot(p.x - game_config.center_x, p.y - game_config.center_y)
         is_inner = 1.0 if dist + p.radius < 50.0 else 0.0
         planet_features[idx] = [
             is_me,
@@ -90,8 +95,8 @@ def encode_observation(obs, max_planets=MAX_PLANETS, max_fleets=MAX_FLEETS):
     for idx, f in enumerate(sorted(fleets, key=lambda item: (item.x, item.y))[:max_fleets]):
         is_me = 1.0 if f.owner == player_id else 0.0
         is_enemy = 1.0 if f.owner != player_id else 0.0
-        x_norm = f.x / BOARD_SIZE
-        y_norm = f.y / BOARD_SIZE
+        x_norm = f.x / game_config.board_size
+        y_norm = f.y / game_config.board_size
         cos_a = math.cos(f.angle)
         sin_a = math.sin(f.angle)
         ships_norm = _log_scale(f.ships)
@@ -128,7 +133,9 @@ def encode_observation(obs, max_planets=MAX_PLANETS, max_fleets=MAX_FLEETS):
         axis=0,
     )
     if obs_vector.shape[0] != (
-        max_planets * PLANET_FEATURES + max_fleets * FLEET_FEATURES + GLOBAL_FEATURES
+        max_planets * obs_config.planet_features
+        + max_fleets * obs_config.fleet_features
+        + obs_config.global_features
     ):
         raise ValueError("Unexpected observation size.")
     return obs_vector

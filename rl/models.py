@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-from .config import MODEL_HIDDEN_SIZES
+from .config import DEFAULT_CONFIG, ModelConfig
 
 
 def _build_mlp(input_dim, hidden_sizes, output_dim, dropout):
@@ -22,10 +22,16 @@ class ActorCritic(nn.Module):
         obs_dim,
         actions_per_source,
         max_sources,
-        hidden_sizes=MODEL_HIDDEN_SIZES,
-        dropout=0.1,
+        hidden_sizes=None,
+        dropout=None,
+        model_config: ModelConfig = None,
     ):
         super().__init__()
+        config = model_config or DEFAULT_CONFIG.model
+        if hidden_sizes is None:
+            hidden_sizes = config.hidden_sizes
+        if dropout is None:
+            dropout = config.dropout
         self.actions_per_source = actions_per_source
         self.max_sources = max_sources
         self.body = _build_mlp(obs_dim, hidden_sizes, hidden_sizes[-1], dropout)

@@ -1,9 +1,11 @@
 import math
 import random
+from typing import Optional
+
 import torch
 from kaggle_environments.envs.orbit_wars.orbit_wars import Planet
 from .action import ActionBuilder, sample_action_sequence
-from .config import MAX_LAUNCHES_PER_SOURCE
+from .config import ActionSpaceConfig, DEFAULT_CONFIG, GameConfig, ObsConfig
 from .obs import encode_observation
 from .models import ActorCritic
 
@@ -43,15 +45,27 @@ class RandomOpponent:
 
 
 class PolicyOpponent:
-    def __init__(self, policy, device="cpu"):
+    def __init__(
+        self,
+        policy,
+        device="cpu",
+        action_config: Optional[ActionSpaceConfig] = None,
+        obs_config: Optional[ObsConfig] = None,
+        game_config: Optional[GameConfig] = None,
+    ):
         self.policy = policy.to(device)
         self.policy.eval()
         self.device = device
-        self._action_builder = ActionBuilder()
+        self.action_config = action_config or DEFAULT_CONFIG.action
+        self.obs_config = obs_config or DEFAULT_CONFIG.obs
+        self.game_config = game_config or DEFAULT_CONFIG.game
+        self._action_builder = ActionBuilder(self.action_config)
 
     def act(self, obs):
         actions, source_ships = self._action_builder.build(obs)
-        obs_vector = encode_observation(obs)
+        obs_vector = encode_observation(
+            obs, obs_config=self.obs_config, game_config=self.game_config
+        )
         obs_tensor = torch.from_numpy(obs_vector).float().unsqueeze(0).to(self.device)
         with torch.no_grad():
             logits, _ = self.policy(obs_tensor)
@@ -59,22 +73,34 @@ class PolicyOpponent:
                 logits.squeeze(0),
                 actions,
                 source_ships,
-                max_launches=MAX_LAUNCHES_PER_SOURCE,
+                max_launches=self.action_config.max_launches_per_source,
                 deterministic=True,
+                action_config=self.action_config,
             )
         return self._action_builder.decode(
             action_indices,
             actions,
             source_ships,
-            max_launches=MAX_LAUNCHES_PER_SOURCE,
+            max_launches=self.action_config.max_launches_per_source,
         )
 
 
 class OpponentPool:
-    def __init__(self, policy_factory, capacity=5, device="cpu"):
+    def __init__(
+        self,
+        policy_factory,
+        capacity=5,
+        device="cpu",
+        action_config: Optional[ActionSpaceConfig] = None,
+        obs_config: Optional[ObsConfig] = None,
+        game_config: Optional[GameConfig] = None,
+    ):
         self.policy_factory = policy_factory
         self.capacity = capacity
         self.device = device
+        self.action_config = action_config or DEFAULT_CONFIG.action
+        self.obs_config = obs_config or DEFAULT_CONFIG.obs
+        self.game_config = game_config or DEFAULT_CONFIG.game
         self.snapshots = []
 
     def add(self, state_dict):
@@ -88,4 +114,10 @@ class OpponentPool:
         state_dict = random.choice(self.snapshots)
         policy = self.policy_factory().to(self.device)
         policy.load_state_dict(state_dict)
-        return PolicyOpponent(policy, device=self.device)
+        return PolicyOpponent(
+            policy,
+            device=self.device,
+            action_config=self.action_config,
+            obs_config=self.obs_config,
+            game_config=self.game_config,
+        )

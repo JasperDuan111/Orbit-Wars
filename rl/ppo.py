@@ -1,8 +1,11 @@
+from typing import Optional
+
 import numpy as np
 import torch
 from torch.nn.utils import clip_grad_norm_
 
 from .action import ActionBuilder, logprob_for_action_sequence
+from .config import ActionSpaceConfig, DEFAULT_CONFIG
 
 
 class RolloutBuffer:
@@ -75,7 +78,7 @@ class RolloutBuffer:
 
 
 class PPOTrainer:
-    def __init__(self, policy, optimizer, config, device):
+    def __init__(self, policy, optimizer, config, device, action_config: Optional[ActionSpaceConfig] = None):
         self.policy = policy
         self.optimizer = optimizer
         self.clip_range = config.clip_range
@@ -85,8 +88,9 @@ class PPOTrainer:
         self.epochs = config.epochs
         self.batch_size = config.batch_size
         self.device = device
-        self.action_builder = ActionBuilder()
-        self.max_launches = config.max_launches_per_source
+        self.action_config = action_config or DEFAULT_CONFIG.action
+        self.action_builder = ActionBuilder(self.action_config)
+        self.max_launches = self.action_config.max_launches_per_source
 
     def update(self, buffer):
         advantages = buffer.advantages.reshape(-1)
@@ -114,6 +118,7 @@ class PPOTrainer:
                         source_ships,
                         actions[i],
                         max_launches=self.max_launches,
+                        action_config=self.action_config,
                     )
                     new_logprobs.append(logprob)
                     entropies.append(entropy)

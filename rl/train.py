@@ -1,12 +1,14 @@
 import argparse
 import os
 import random
+from dataclasses import replace
+
 import numpy as np
 import torch
 from torch.utils.tensorboard import SummaryWriter
 
 from .action import sample_action_sequence
-from .config import ACTIONS_PER_SOURCE, MAX_SOURCES, OBS_DIM, PPOConfig
+from .config import OrbitWarsConfig
 from .envs.orbit_wars_env import OrbitWarsSelfPlayEnv
 from .models import ActorCritic
 from .obs import encode_observation
@@ -23,64 +25,77 @@ def set_seed(seed):
 
 
 def main():
-    config = PPOConfig()
+    config = OrbitWarsConfig()
     parser = argparse.ArgumentParser(description="Orbit Wars PPO self-play training")
-    parser.add_argument("--total-updates", type=int, default=config.total_updates)
-    parser.add_argument("--rollout-steps", type=int, default=config.rollout_steps)
-    parser.add_argument("--seed", type=int, default=config.seed)
+    parser.add_argument("--total-updates", type=int, default=config.train.total_updates)
+    parser.add_argument("--rollout-steps", type=int, default=config.train.rollout_steps)
+    parser.add_argument("--seed", type=int, default=config.train.seed)
     parser.add_argument("--save-dir", type=str, default="checkpoints")
     parser.add_argument("--device", type=str, default=None)
     parser.add_argument("--log-dir", type=str, default="runs/orbit_wars")
-    parser.add_argument("--num-envs", type=int, default=config.num_envs)
+    parser.add_argument("--num-envs", type=int, default=config.train.num_envs)
     parser.add_argument(
         "--max-launches-per-source",
         type=int,
-        default=config.max_launches_per_source,
+        default=config.action.max_launches_per_source,
     )
     args = parser.parse_args()
 
-    config.total_updates = args.total_updates
-    config.rollout_steps = args.rollout_steps
-    config.seed = args.seed
-    config.num_envs = args.num_envs
-    config.max_launches_per_source = args.max_launches_per_source
+    config.train.total_updates = args.total_updates
+    config.train.rollout_steps = args.rollout_steps
+    config.train.seed = args.seed
+    config.train.num_envs = args.num_envs
+    config.action = replace(
+        config.action, max_launches_per_source=args.max_launches_per_source
+    )
 
     device = args.device
     if device is None:
         device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    set_seed(config.seed)
+    set_seed(config.train.seed)
 
     writer = SummaryWriter(log_dir=args.log_dir)
 
     envs = [
         OrbitWarsSelfPlayEnv(
             opponent=NearestPlanetOpponent(),
-            seed=config.seed + i,
-            reward_scale=config.reward_scale,
-            invalid_action_penalty=config.invalid_action_penalty,
-            terminal_reward_scale=config.terminal_reward_scale,
-            max_launches_per_source=config.max_launches_per_source,
+            env_config=replace(config.env, seed=config.train.seed + i),
+            reward_config=config.reward,
+            action_config=config.action,
         )
-        for i in range(config.num_envs)
+        for i in range(config.train.num_envs)
     ]
 
-    policy = ActorCritic(OBS_DIM, ACTIONS_PER_SOURCE, MAX_SOURCES).to(device)
-    optimizer = torch.optim.Adam(policy.parameters(), lr=config.learning_rate)
-    trainer = PPOTrainer(policy, optimizer, config, device)
+    policy = ActorCritic(
+        config.obs.obs_dim,
+        config.action.actions_per_source,
+        config.action.max_sources,
+        model_config=config.model,
+    ).to(device)
+    optimizer = torch.optim.Adam(policy.parameters(), lr=config.train.learning_rate)
+    trainer = PPOTrainer(policy, optimizer, config.train, device, action_config=config.action)
     buffer = RolloutBuffer(
-        config.rollout_steps,
-        config.num_envs,
-        OBS_DIM,
-        MAX_SOURCES,
-        config.max_launches_per_source,
+        config.train.rollout_steps,
+        config.train.num_envs,
+        config.obs.obs_dim,
+        config.action.max_sources,
+        config.action.max_launches_per_source,
         device,
     )
 
     pool = OpponentPool(
-        lambda: ActorCritic(OBS_DIM, ACTIONS_PER_SOURCE, MAX_SOURCES),
+        lambda: ActorCritic(
+            config.obs.obs_dim,
+            config.action.actions_per_source,
+            config.action.max_sources,
+            model_config=config.model,
+        ),
         capacity=5,
         device=device,
+        action_config=config.action,
+        obs_config=config.obs,
+        game_config=config.game,
     )
     for env in envs:
         env.set_opponent(pool.sample())
@@ -88,10 +103,17 @@ def main():
     obs_list = [env.reset() for env in envs]
 
     try:
-        for update in range(1, config.total_updates + 1):
+        for update in range(1, config.train.total_updates + 1):
             buffer.clear()
-            for _ in range(config.rollout_steps):
-                obs_vec_batch = np.stack([encode_observation(obs) for obs in obs_list])
+            for _ in range(config.train.rollout_steps):
+                obs_vec_batch = np.stack(
+                    [
+                        encode_observation(
+                            obs, obs_config=config.obs, game_config=config.game
+                        )
+                        for obs in obs_list
+                    ]
+                )
                 obs_tensor = torch.from_numpy(obs_vec_batch).float().to(device)
 
                 with torch.no_grad():
@@ -99,15 +121,19 @@ def main():
                 values_batch = values_batch.squeeze(-1)
 
                 actions_batch = torch.zeros(
-                    (config.num_envs, MAX_SOURCES, config.max_launches_per_source),
+                    (
+                        config.train.num_envs,
+                        config.action.max_sources,
+                        config.action.max_launches_per_source,
+                    ),
                     dtype=torch.long,
                     device=device,
                 )
-                logprobs_batch = torch.zeros((config.num_envs,), device=device)
+                logprobs_batch = torch.zeros((config.train.num_envs,), device=device)
 
                 next_obs_list = []
-                rewards = torch.zeros((config.num_envs,), device=device)
-                dones = torch.zeros((config.num_envs,), device=device)
+                rewards = torch.zeros((config.train.num_envs,), device=device)
+                dones = torch.zeros((config.train.num_envs,), device=device)
                 obs_snapshots = []
 
                 for i, env in enumerate(envs):
@@ -117,8 +143,9 @@ def main():
                         logits_batch[i],
                         action_templates,
                         source_ships,
-                        max_launches=config.max_launches_per_source,
+                        max_launches=config.action.max_launches_per_source,
                         deterministic=False,
+                        action_config=config.action,
                     )
                     actions_batch[i] = action_indices
                     logprobs_batch[i] = logprob
@@ -146,12 +173,19 @@ def main():
 
                 obs_list = next_obs_list
 
-            last_obs_vec = np.stack([encode_observation(obs) for obs in obs_list])
+            last_obs_vec = np.stack(
+                [
+                    encode_observation(
+                        obs, obs_config=config.obs, game_config=config.game
+                    )
+                    for obs in obs_list
+                ]
+            )
             last_obs_tensor = torch.from_numpy(last_obs_vec).float().to(device)
             with torch.no_grad():
                 _, last_values = policy(last_obs_tensor)
             buffer.compute_returns_and_advantages(
-                last_values.squeeze(-1), config.gamma, config.gae_lambda
+                last_values.squeeze(-1), config.train.gamma, config.train.gae_lambda
             )
 
             stats = trainer.update(buffer)
@@ -163,13 +197,13 @@ def main():
             writer.add_scalar("train/entropy", stats["entropy"], update)
             writer.add_scalar("train/learning_rate", optimizer.param_groups[0]["lr"], update)
 
-            if update % config.save_every == 0:
+            if update % config.train.save_every == 0:
                 os.makedirs(args.save_dir, exist_ok=True)
                 ckpt_path = os.path.join(args.save_dir, f"ppo_orbit_wars_{update}.pt")
                 torch.save(policy.state_dict(), ckpt_path)
                 pool.add(policy.state_dict())
 
-            if update % config.opponent_refresh == 0:
+            if update % config.train.opponent_refresh == 0:
                 for env in envs:
                     env.set_opponent(pool.sample())
 

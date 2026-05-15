@@ -17,7 +17,7 @@
 ```
 rl/
 ├── __init__.py              # 包声明
-├── config.py                # 所有常量 + PPO 超参数 dataclass
+├── config.py                # 配置分组与默认配置（OrbitWarsConfig 等）
 ├── models.py                # Actor-Critic 网络定义
 ├── action.py                # 动作空间：构建合法动作模板、编解码、采样/对数概率
 ├── obs.py                   # 观测编码：原始 dict → 固定维度 numpy 向量
@@ -36,32 +36,29 @@ rl/
 
 ### 3.1 `config.py` — 配置
 
-定义所有硬编码常量和 PPO 超参数。
+配置被拆成多个 dataclass，并通过 `OrbitWarsConfig` 统一管理，便于扩展与复用。
 
-**游戏常量：**
+**核心结构：**
+- `GameConfig`：地图与中心点等几何常量
+- `ObsConfig`：观测规模（max_planets / max_fleets / feature dims）
+- `ActionSpaceConfig`：动作规模（max_sources / max_targets / ship_fractions / max_launches_per_source）
+- `ModelConfig`：网络结构（hidden_sizes / dropout）
+- `TrainConfig`：PPO 训练超参数
+- `RewardConfig`：reward 各项缩放
+- `EnvConfig`：环境运行参数（num_players / episode_steps / act_timeout / seed / debug）
 
-| 常量 | 值 | 含义 |
-|---|---|---|
-| `BOARD_SIZE` | 100.0 | 地图边长 |
-| `MAX_PLANETS` | 48 | 最大星球编码数 |
-| `MAX_FLEETS` | 64 | 最大舰队编码数 |
-| `PLANET_FEATURES` | 10 | 每个星球的特征维数 |
-| `FLEET_FEATURES` | 7 | 每个舰队的特征维数 |
-| `GLOBAL_FEATURES` | 6 | 全局特征维数 |
-| `MAX_SOURCES` | 8 | 最多从 N 个己方星球发射 |
-| `MAX_TARGETS` | 8 | 每个源星球最多考虑 N 个目标 |
-| `SHIP_FRACTIONS` | (0.25, 0.5, 0.75, 1.0) | 发射飞船比例 |
-| `MAX_LAUNCHES_PER_SOURCE` | 6 | 每个源星球最多连续发射几次 |
-| `ACTIONS_PER_SOURCE` | 1 + 8×4 = 33 | 每个源星球的动作维度（1 停止 + 8×4 目标/比例组合） |
-| `OBS_DIM` | 964 | 观测向量总维度 |
+`OrbitWarsConfig` 聚合上述配置，并提供：
+- `obs_dim`：由 `ObsConfig` 自动计算
+- `actions_per_source`：由 `ActionSpaceConfig` 自动计算
 
-**PPOConfig dataclass 字段说明：**
+为兼容旧用法，仍保留 `MAX_PLANETS`、`OBS_DIM` 等常量，值来自 `DEFAULT_CONFIG`。
+
+**TrainConfig 常用字段：**
 
 | 参数 | 默认值 | 含义 |
 |---|---|---|
 | `seed` | 42 | 随机种子 |
 | `num_envs` | 2 | 并行环境数（同时跑几局） |
-| `max_launches_per_source` | 6 | 同义 `MAX_LAUNCHES_PER_SOURCE` |
 | `total_updates` | 2000 | 总 PPO 更新轮数 |
 | `rollout_steps` | 64 | 每轮收集多少步经验 |
 | `gamma` | 0.99 | 折扣因子 |
@@ -75,9 +72,17 @@ rl/
 | `epochs` | 4 | 每轮数据重复训练几次 |
 | `save_every` | 50 | 每 N 轮保存一次 checkpoint |
 | `opponent_refresh` | 10 | 每 N 轮重新采样对手 |
+
+**RewardConfig 常用字段：**
+
+| 参数 | 默认值 | 含义 |
+|---|---|---|
 | `reward_scale` | 0.01 | 稠密 reward 缩放 |
 | `invalid_action_penalty` | 0.05 | 非法动作惩罚 |
 | `terminal_reward_scale` | 0.01 | 终局 reward 缩放 |
+| `planet_control_scale` | 0.0 | 星球控制奖励 |
+| `production_scale` | 0.0 | 产量奖励 |
+| `survival_reward` | 0.0 | 生存奖励 |
 
 ---
 
@@ -110,11 +115,11 @@ rl/
   - 输入原始观测，返回 **合法动作模板列表** 和 **各源星球飞船数**。
   - 流程：
     1. 取出己方星球，按飞船数降序排序
-    2. 对前 `MAX_SOURCES`(8) 个己方星球，生成 33 维动作槽位：
+    2. 对前 `ActionSpaceConfig.max_sources`（默认 8）个己方星球，生成 `actions_per_source` 维动作槽位：
        - 槽位 0：停止发射（恒为合法）
-       - 槽位 1-33：对排序后的前 8 个目标星球 × 4 个飞船比例（目标排序：己方优先 → 距离近优先）
+       - 槽位 1..：对排序后的前 `ActionSpaceConfig.max_targets` 个目标星球 × `ship_fractions` 组合（目标排序：己方优先 → 距离近优先）
     3. 每个槽位存储一个 `ActionTemplate(source_id, angle, fraction)`
-  - 返回 `actions` (8 行 × 33 列的模板矩阵) 和 `source_ships` (每个源星球的飞船数)
+  - 返回 `actions` (`max_sources` 行 × `actions_per_source` 列的模板矩阵) 和 `source_ships` (每个源星球的飞船数)
 
 - `decode(action_indices, actions, source_ships, max_launches)` → `moves`
   - 将模型输出的动作索引转换为 Kaggle 引擎需要的 `[[from_id, angle, ships], ...]` 格式。
@@ -128,7 +133,7 @@ rl/
 - 根据剩余飞船数和比例计算发送数量，最少 1 艘，最多全部剩余。
 
 **`_mask_tensor(source_actions, remaining_ships, device)` → `Tensor`**
-- 为给定源星球生成 33 维合法动作 mask（0=非法, 1=合法）。
+- 为给定源星球生成 `actions_per_source` 维合法动作 mask（0=非法, 1=合法）。
 - 槽位 0（停止）始终合法；其余槽位根据余额是否够发 1 艘判断合法性。
 
 **`sample_action_sequence(logits, actions, source_ships, max_launches, deterministic)`**
@@ -156,7 +161,7 @@ rl/
 **`ship_totals(obs, player_id)` → `(my_total, enemy_total)`**
 - 统计某玩家的总飞船数（星球 garrison + 飞行中舰队）。
 
-**`encode_observation(obs, max_planets, max_fleets)` → `np.ndarray` (964,)**
+**`encode_observation(obs, max_planets=None, max_fleets=None, obs_config=None, game_config=None)` → `np.ndarray` (964,)**
 - 星球特征（48 × 10）：`[is_me, is_enemy, is_neutral, x_norm, y_norm, radius_norm, ships_log, production_norm, is_comet, is_inner]`
   - `is_inner`：星球是否在内圈（距中心 < 50）
   - 排序优先级：己方 → 敌方 → 距中心近
@@ -199,7 +204,7 @@ rl/
 **`main()`** — 训练入口
 
 流程：
-1. 解析命令行参数（`--total-updates`, `--rollout-steps`, `--seed`, `--save-dir`, `--device`, `--log-dir`, `--num-envs`, `--max-launches-per-source`）
+1. 初始化 `OrbitWarsConfig`，并用命令行参数覆盖 `TrainConfig` / `ActionSpaceConfig`
 2. 创建 `SummaryWriter`（TensorBoard 日志）
 3. 创建 `num_envs` 个 `OrbitWarsSelfPlayEnv`，初始对手为 `NearestPlanetOpponent`
 4. 初始化 `ActorCritic` 网络 + Adam 优化器 + `PPOTrainer` + `RolloutBuffer`
@@ -256,11 +261,19 @@ tensorboard --logdir runs/orbit_wars
 
 **`__init__` 参数：**
 - `opponent`：对手策略实例
-- `num_players`：玩家数（默认 2）
-- `episode_steps`：最大步数（默认 500）
-- `reward_scale`：差分 reward 缩放（默认 0.01）
-- `invalid_action_penalty`：非法动作惩罚（默认 0.05）
-- `terminal_reward_scale`：终局 reward 缩放（默认 0.01）
+- `env_config`：环境配置（`EnvConfig`，默认使用 `DEFAULT_CONFIG.env`）
+- `reward_config`：reward 配置（`RewardConfig`，默认使用 `DEFAULT_CONFIG.reward`）
+- `action_config`：动作空间配置（`ActionSpaceConfig`，默认使用 `DEFAULT_CONFIG.action`）
+
+如需局部覆盖，可使用 `dataclasses.replace`：
+
+```python
+from dataclasses import replace
+from rl.config import DEFAULT_CONFIG
+
+env_config = replace(DEFAULT_CONFIG.env, seed=123, episode_steps=300)
+reward_config = replace(DEFAULT_CONFIG.reward, reward_scale=0.02)
+```
 
 **关键方法：**
 - `reset()` → `obs`：重置环境，初始化飞船差基准线，构建动作模板。

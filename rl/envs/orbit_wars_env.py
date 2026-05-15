@@ -1,7 +1,7 @@
 from kaggle_environments import make
 from kaggle_environments.envs.orbit_wars.orbit_wars import Planet
 from ..action import ActionBuilder
-from ..config import MAX_LAUNCHES_PER_SOURCE
+from ..config import ActionSpaceConfig, DEFAULT_CONFIG, EnvConfig, RewardConfig
 from ..obs import ship_totals
 from ..opponents import NearestPlanetOpponent
 
@@ -16,35 +16,38 @@ class OrbitWarsSelfPlayEnv:
     def __init__(
         self,
         opponent=None,
-        num_players=2,
-        episode_steps=500,
-        act_timeout=1,
-        seed=None,
-        reward_scale=0.01,
-        invalid_action_penalty=0.05,
-        terminal_reward_scale=0.01,
-        max_launches_per_source=MAX_LAUNCHES_PER_SOURCE,
-        debug=False,
+        *,
+        env_config: EnvConfig = DEFAULT_CONFIG.env,
+        reward_config: RewardConfig = DEFAULT_CONFIG.reward,
+        action_config: ActionSpaceConfig = DEFAULT_CONFIG.action,
     ):
-        configuration = {"episodeSteps": episode_steps, "actTimeout": act_timeout}
-        if seed is not None:
-            configuration["seed"] = seed
-        configuration["numPlayers"] = num_players
-        self._env = make("orbit_wars", configuration=configuration, debug=debug)
-        self.num_players = num_players
+        configuration = {
+            "episodeSteps": env_config.episode_steps,
+            "actTimeout": env_config.act_timeout,
+        }
+        if env_config.seed is not None:
+            configuration["seed"] = env_config.seed
+        configuration["numPlayers"] = env_config.num_players
+        self._env = make("orbit_wars", configuration=configuration, debug=env_config.debug)
+        self.num_players = env_config.num_players
         self.player_index = 0
-        self._action_builder = ActionBuilder()
+        self._action_builder = ActionBuilder(action_config)
         self._last_actions = None
         self._last_source_ships = None
         self._last_diff = None
-        self.reward_scale = reward_scale
-        self.invalid_action_penalty = invalid_action_penalty
-        self.terminal_reward_scale = terminal_reward_scale
-        self.max_launches_per_source = max_launches_per_source
+        self._last_planet_diff = None
+        self._last_production_diff = None
+        self.reward_scale = reward_config.reward_scale
+        self.invalid_action_penalty = reward_config.invalid_action_penalty
+        self.terminal_reward_scale = reward_config.terminal_reward_scale
+        self.planet_control_scale = reward_config.planet_control_scale
+        self.production_scale = reward_config.production_scale
+        self.survival_reward = reward_config.survival_reward
+        self.max_launches_per_source = action_config.max_launches_per_source
 
         opponent = opponent or NearestPlanetOpponent()
         if not isinstance(opponent, list):
-            opponent = [opponent] * (num_players - 1)
+            opponent = [opponent] * (self.num_players - 1)
         self._opponents = opponent
 
     @property
@@ -73,6 +76,9 @@ class OrbitWarsSelfPlayEnv:
         player_id = _get_field(obs, "player", 0)
         my_total, enemy_total = ship_totals(obs, player_id)
         self._last_diff = my_total - enemy_total
+        planet_diff, production_diff = self._planet_and_production_diff(obs, player_id)
+        self._last_planet_diff = planet_diff
+        self._last_production_diff = production_diff
         self._last_actions, self._last_source_ships = self._action_builder.build(obs)
         return obs
 
@@ -102,13 +108,7 @@ class OrbitWarsSelfPlayEnv:
         self._env.step(actions)
 
         obs = self._get_obs(self.player_index)
-        my_total, enemy_total = ship_totals(obs, player_id)
-        diff = my_total - enemy_total
-        reward = (diff - self._last_diff) * self.reward_scale if self._last_diff is not None else 0.0
-        done = self._is_done()
-        if done:
-            reward += diff * self.terminal_reward_scale
-        self._last_diff = diff
+        my_total, enemy_total, diff, done, reward = self._compute_reward(obs, player_id)
 
         self._last_actions, self._last_source_ships = self._action_builder.build(obs)
         info = {
@@ -120,6 +120,36 @@ class OrbitWarsSelfPlayEnv:
         if invalid_count > 0:
             reward -= self.invalid_action_penalty * invalid_count
         return obs, reward, done, info
+
+    def _compute_reward(self, obs, player_id):
+        my_total, enemy_total = ship_totals(obs, player_id)
+        diff = my_total - enemy_total
+        reward = (diff - self._last_diff) * self.reward_scale if self._last_diff is not None else 0.0
+        planet_diff, production_diff = self._planet_and_production_diff(obs, player_id)
+        if self._last_planet_diff is not None:
+            reward += (planet_diff - self._last_planet_diff) * self.planet_control_scale
+        if self._last_production_diff is not None:
+            reward += (production_diff - self._last_production_diff) * self.production_scale
+        done = self._is_done()
+        if done:
+            reward += diff * self.terminal_reward_scale
+        elif self.survival_reward:
+            reward += self.survival_reward
+        self._last_diff = diff
+        self._last_planet_diff = planet_diff
+        self._last_production_diff = production_diff
+        return my_total, enemy_total, diff, done, reward
+
+    def _planet_and_production_diff(self, obs, player_id):
+        raw_planets = obs.get("planets", []) if isinstance(obs, dict) else obs.planets
+        planets = [Planet(*p) for p in raw_planets]
+        my_planets = [p for p in planets if p.owner == player_id]
+        enemy_planets = [p for p in planets if p.owner not in (-1, player_id)]
+        planet_diff = len(my_planets) - len(enemy_planets)
+        my_production = sum(p.production for p in my_planets)
+        enemy_production = sum(p.production for p in enemy_planets)
+        production_diff = my_production - enemy_production
+        return planet_diff, production_diff
 
     def _get_obs(self, index):
         return self._env.state[index].observation
