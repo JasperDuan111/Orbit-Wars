@@ -13,8 +13,8 @@ class GameConfig:
 class ObsConfig:
     max_planets: int = 48
     max_fleets: int = 64
-    planet_features: int = 10
-    fleet_features: int = 7
+    planet_features: int = 11
+    fleet_features: int = 9
     global_features: int = 6
 
     @property

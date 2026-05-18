@@ -79,7 +79,9 @@ def encode_observation(
         is_comet = 1.0 if p.id in comet_ids else 0.0
         dist = math.hypot(p.x - game_config.center_x, p.y - game_config.center_y)
         is_inner = 1.0 if dist + p.radius < 50.0 else 0.0
+        planet_id_norm = p.id / max_planets
         planet_features[idx] = [
+            planet_id_norm,
             is_me,
             is_enemy,
             is_neutral,
@@ -100,7 +102,11 @@ def encode_observation(
         cos_a = math.cos(f.angle)
         sin_a = math.sin(f.angle)
         ships_norm = _log_scale(f.ships)
+        fleet_id_norm = f.id / max_fleets
+        from_planet_norm = f.from_planet_id / max_planets
         fleet_features[idx] = [
+            fleet_id_norm,
+            from_planet_norm,
             is_me,
             is_enemy,
             x_norm,
