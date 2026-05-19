@@ -113,12 +113,18 @@ def main():
     if args.resume:
         print(f"Resuming from {args.resume}")
         ckpt = torch.load(args.resume, map_location=device, weights_only=False)
-        policy.load_state_dict(ckpt["policy_state_dict"])
-        optimizer.load_state_dict(ckpt["optimizer_state_dict"])
-        start_update = ckpt.get("update", 0) + 1
-        if "pool_snapshots" in ckpt:
-            pool.restore_snapshots(ckpt["pool_snapshots"])
-        print(f"  Restored policy, optimizer, pool.  Starting at update {start_update}")
+        if isinstance(ckpt, dict) and "policy_state_dict" in ckpt:
+            # New format: full checkpoint with metadata
+            policy.load_state_dict(ckpt["policy_state_dict"])
+            optimizer.load_state_dict(ckpt["optimizer_state_dict"])
+            start_update = ckpt.get("update", 0) + 1
+            if "pool_snapshots" in ckpt:
+                pool.restore_snapshots(ckpt["pool_snapshots"])
+            print(f"  Restored policy, optimizer, pool.  Starting at update {start_update}")
+        else:
+            # Old format: raw state_dict only (no optimizer / pool / update)
+            policy.load_state_dict(ckpt)
+            print("  Old-format checkpoint — only policy restored.  Starting at update 1")
 
     for env in envs:
         env.set_opponent(pool.sample())
