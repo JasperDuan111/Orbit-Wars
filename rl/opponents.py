@@ -1,7 +1,9 @@
 import math
 import random
+from collections import defaultdict
 from typing import Optional
 
+import numpy as np
 import torch
 from kaggle_environments.envs.orbit_wars.orbit_wars import Planet
 from .action import ActionBuilder, sample_action_sequence
@@ -84,6 +86,66 @@ class PolicyOpponent:
             max_launches=self.action_config.max_launches_per_source,
         )
 
+    @staticmethod
+    def batch_act(opponents_with_obs, device, action_config=None, obs_config=None,
+                  game_config=None, episode_steps=500):
+        """Batch inference for multiple PolicyOpponents on GPU.
+
+        Groups opponents by policy identity so that opponents sharing the
+        same model checkpoint run in a single batched forward pass.
+        """
+        action_config = action_config or DEFAULT_CONFIG.action
+        obs_config = obs_config or DEFAULT_CONFIG.obs
+        game_config = game_config or DEFAULT_CONFIG.game
+        max_launches = action_config.max_launches_per_source
+
+        groups = defaultdict(list)
+        for idx, (opponent, _obs) in enumerate(opponents_with_obs):
+            groups[id(opponent.policy)].append(idx)
+
+        results = [None] * len(opponents_with_obs)
+
+        for _policy_id, indices in groups.items():
+            first = opponents_with_obs[indices[0]][0]
+            policy = first.policy
+
+            obs_vectors = []
+            templates_list = []
+            ships_list = []
+            for idx in indices:
+                _, obs = opponents_with_obs[idx]
+                actions, source_ships = first._action_builder.build(obs)
+                obs_vec = encode_observation(
+                    obs, obs_config=obs_config, game_config=game_config,
+                    episode_steps=episode_steps,
+                )
+                obs_vectors.append(obs_vec)
+                templates_list.append(actions)
+                ships_list.append(source_ships)
+
+            obs_tensor = torch.from_numpy(np.stack(obs_vectors)).float().to(device)
+            with torch.no_grad():
+                logits_batch, _ = policy(obs_tensor)
+
+            for i, idx in enumerate(indices):
+                _, obs = opponents_with_obs[idx]
+                action_indices, _, _ = sample_action_sequence(
+                    logits_batch[i],
+                    templates_list[i],
+                    ships_list[i],
+                    max_launches=max_launches,
+                    deterministic=True,
+                    action_config=action_config,
+                )
+                results[idx] = first._action_builder.decode(
+                    action_indices,
+                    templates_list[i],
+                    ships_list[i],
+                    max_launches=max_launches,
+                )
+
+        return results
+
 
 class OpponentPool:
     def __init__(
@@ -101,19 +163,25 @@ class OpponentPool:
         self.action_config = action_config or DEFAULT_CONFIG.action
         self.obs_config = obs_config or DEFAULT_CONFIG.obs
         self.game_config = game_config or DEFAULT_CONFIG.game
-        self.snapshots = []
+        self._snapshots = []
+        self._policy_instances = []
 
     def add(self, state_dict):
-        self.snapshots.append({key: value.cpu() for key, value in state_dict.items()})
-        if len(self.snapshots) > self.capacity:
-            self.snapshots.pop(0)
+        cpu_dict = {key: value.cpu() for key, value in state_dict.items()}
+        self._snapshots.append(cpu_dict)
+        policy = self.policy_factory().to(self.device)
+        policy.load_state_dict(cpu_dict)
+        policy.eval()
+        self._policy_instances.append(policy)
+        if len(self._snapshots) > self.capacity:
+            self._snapshots.pop(0)
+            old = self._policy_instances.pop(0)
+            del old
 
     def sample(self):
-        if not self.snapshots:
+        if not self._policy_instances:
             return random.choice([NearestPlanetOpponent(), RandomOpponent()])
-        state_dict = random.choice(self.snapshots)
-        policy = self.policy_factory().to(self.device)
-        policy.load_state_dict(state_dict)
+        policy = random.choice(self._policy_instances)
         return PolicyOpponent(
             policy,
             device=self.device,

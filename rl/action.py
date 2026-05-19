@@ -47,7 +47,7 @@ class ActionBuilder:
             def _target_priority(tgt):
                 is_own = 1 if tgt.owner == player_id else 0
                 dist = math.hypot(src.x - tgt.x, src.y - tgt.y)
-                return (is_own, dist)
+                return (-is_own, dist)
 
             ordered_targets = sorted(
                 (p for p in planets if p.id != src.id),

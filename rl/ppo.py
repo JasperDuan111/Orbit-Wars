@@ -2,6 +2,7 @@ from typing import Optional
 
 import numpy as np
 import torch
+from torch.cuda.amp import autocast, GradScaler
 from torch.nn.utils import clip_grad_norm_
 
 from .action import ActionBuilder, logprob_for_action_sequence
@@ -78,7 +79,9 @@ class RolloutBuffer:
 
 
 class PPOTrainer:
-    def __init__(self, policy, optimizer, config, device, action_config: Optional[ActionSpaceConfig] = None):
+    def __init__(self, policy, optimizer, config, device,
+                 action_config: Optional[ActionSpaceConfig] = None,
+                 use_amp: bool = False):
         self.policy = policy
         self.optimizer = optimizer
         self.clip_range = config.clip_range
@@ -88,6 +91,8 @@ class PPOTrainer:
         self.epochs = config.epochs
         self.batch_size = config.batch_size
         self.device = device
+        self.use_amp = use_amp
+        self.scaler = GradScaler() if use_amp else None
         self.action_config = action_config or DEFAULT_CONFIG.action
         self.action_builder = ActionBuilder(self.action_config)
         self.max_launches = self.action_config.max_launches_per_source
@@ -103,7 +108,11 @@ class PPOTrainer:
             for batch_idx, obs, actions, old_logprobs, returns, adv, raw_obs in buffer.get(
                 self.batch_size
             ):
-                logits, values = self.policy(obs)
+                if self.use_amp:
+                    with autocast():
+                        logits, values = self.policy(obs)
+                else:
+                    logits, values = self.policy(obs)
                 values = values.squeeze(-1)
 
                 adv = advantages[batch_idx]
@@ -142,9 +151,16 @@ class PPOTrainer:
                 loss = policy_loss + self.vf_coef * value_loss - self.ent_coef * entropy
 
                 self.optimizer.zero_grad()
-                loss.backward()
-                clip_grad_norm_(self.policy.parameters(), self.max_grad_norm)
-                self.optimizer.step()
+                if self.use_amp:
+                    self.scaler.scale(loss).backward()
+                    self.scaler.unscale_(self.optimizer)
+                    clip_grad_norm_(self.policy.parameters(), self.max_grad_norm)
+                    self.scaler.step(self.optimizer)
+                    self.scaler.update()
+                else:
+                    loss.backward()
+                    clip_grad_norm_(self.policy.parameters(), self.max_grad_norm)
+                    self.optimizer.step()
 
                 stats["policy_loss"] += policy_loss.item()
                 stats["value_loss"] += value_loss.item()

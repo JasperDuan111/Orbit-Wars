@@ -24,13 +24,13 @@ pip install "kaggle-environments>=1.28.0" torch numpy tensorboard
 
 Train:
 ```bash
-python -m rl.train --log-dir runs/orbit_wars
+python -m rl.train
 ```
 
 TensorBoard:
 
 ```bash
-tensorboard --logdir runs/orbit_wars
+tensorboard --logdir logdir
 ```
 
 Multi-env + multi-launch example:

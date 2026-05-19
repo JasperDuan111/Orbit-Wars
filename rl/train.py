@@ -2,6 +2,7 @@ import argparse
 import os
 import random
 from dataclasses import replace
+from datetime import datetime
 
 import numpy as np
 import torch
@@ -12,7 +13,7 @@ from .config import OrbitWarsConfig
 from .envs.orbit_wars_env import OrbitWarsSelfPlayEnv
 from .models import ActorCritic
 from .obs import encode_observation
-from .opponents import OpponentPool, NearestPlanetOpponent
+from .opponents import OpponentPool, NearestPlanetOpponent, PolicyOpponent
 from .ppo import RolloutBuffer, PPOTrainer
 
 
@@ -32,7 +33,7 @@ def main():
     parser.add_argument("--seed", type=int, default=config.train.seed)
     parser.add_argument("--save-dir", type=str, default="checkpoints")
     parser.add_argument("--device", type=str, default=None)
-    parser.add_argument("--log-dir", type=str, default="runs/orbit_wars")
+    parser.add_argument("--log-dir", type=str, default=None)
     parser.add_argument("--num-envs", type=int, default=config.train.num_envs)
     parser.add_argument(
         "--max-launches-per-source",
@@ -52,10 +53,17 @@ def main():
     device = args.device
     if device is None:
         device = "cuda" if torch.cuda.is_available() else "cpu"
+    use_amp = device == "cuda"
+
+    if device == "cuda":
+        torch.backends.cudnn.benchmark = True
 
     set_seed(config.train.seed)
 
-    writer = SummaryWriter(log_dir=args.log_dir)
+    log_dir = args.log_dir or os.path.join(
+        "runs", "OrbitWars", datetime.now().strftime("%Y%m%d_%H%M%S")
+    )
+    writer = SummaryWriter(log_dir=log_dir)
 
     envs = [
         OrbitWarsSelfPlayEnv(
@@ -74,7 +82,8 @@ def main():
         model_config=config.model,
     ).to(device)
     optimizer = torch.optim.Adam(policy.parameters(), lr=config.train.learning_rate)
-    trainer = PPOTrainer(policy, optimizer, config.train, device, action_config=config.action)
+    trainer = PPOTrainer(policy, optimizer, config.train, device,
+                         action_config=config.action, use_amp=use_amp)
     buffer = RolloutBuffer(
         config.train.rollout_steps,
         config.train.num_envs,
@@ -109,7 +118,8 @@ def main():
                 obs_vec_batch = np.stack(
                     [
                         encode_observation(
-                            obs, obs_config=config.obs, game_config=config.game
+                            obs, obs_config=config.obs, game_config=config.game,
+                            episode_steps=config.env.episode_steps,
                         )
                         for obs in obs_list
                     ]
@@ -131,6 +141,35 @@ def main():
                 )
                 logprobs_batch = torch.zeros((config.train.num_envs,), device=device)
 
+                # --- Batch opponent inference ---
+                opponent_actions_per_env = []
+                policy_opponent_items = []
+
+                for i, env in enumerate(envs):
+                    env_actions = {}
+                    for opp_idx_in_list, opponent, opp_obs in env.get_opponents_data():
+                        if isinstance(opponent, PolicyOpponent):
+                            policy_opponent_items.append(
+                                (i, opp_idx_in_list, opponent, opp_obs)
+                            )
+                        else:
+                            env_actions[opp_idx_in_list] = opponent.act(opp_obs)
+                    opponent_actions_per_env.append(env_actions)
+
+                if policy_opponent_items:
+                    batch_results = PolicyOpponent.batch_act(
+                        [(opp, obs) for _, _, opp, obs in policy_opponent_items],
+                        device=device,
+                        action_config=config.action,
+                        obs_config=config.obs,
+                        game_config=config.game,
+                        episode_steps=config.env.episode_steps,
+                    )
+                    for (env_i, opp_idx, _, _), action in zip(
+                        policy_opponent_items, batch_results
+                    ):
+                        opponent_actions_per_env[env_i][opp_idx] = action
+
                 next_obs_list = []
                 rewards = torch.zeros((config.train.num_envs,), device=device)
                 dones = torch.zeros((config.train.num_envs,), device=device)
@@ -151,7 +190,10 @@ def main():
                     logprobs_batch[i] = logprob
 
                     obs_snapshots.append(dict(obs_list[i]))
-                    next_obs, reward, done, info = env.step(action_indices)
+                    next_obs, reward, done, info = env.step(
+                        action_indices,
+                        opponent_actions=opponent_actions_per_env[i],
+                    )
                     rewards[i] = reward
                     dones[i] = float(done)
 
@@ -176,7 +218,8 @@ def main():
             last_obs_vec = np.stack(
                 [
                     encode_observation(
-                        obs, obs_config=config.obs, game_config=config.game
+                        obs, obs_config=config.obs, game_config=config.game,
+                        episode_steps=config.env.episode_steps,
                     )
                     for obs in obs_list
                 ]

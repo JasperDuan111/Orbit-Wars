@@ -29,7 +29,7 @@ class ObsConfig:
 @dataclass(frozen=True)
 class ActionSpaceConfig:
     max_sources: int = 8
-    max_targets: int = 8
+    max_targets: int = 20
     ship_fractions: Tuple[float, ...] = (0.25, 0.5, 0.75, 1.0)
     max_launches_per_source: int = 6
 
@@ -49,9 +49,9 @@ class RewardConfig:
     reward_scale: float = 0.01
     invalid_action_penalty: float = 0.05
     terminal_reward_scale: float = 0.01
-    planet_control_scale: float = 0.0
-    production_scale: float = 0.0
-    survival_reward: float = 0.0
+    planet_control_scale: float = 10
+    production_scale: float = 1
+    survival_reward: float = 100
 
 
 @dataclass
@@ -66,7 +66,7 @@ class EnvConfig:
 @dataclass
 class TrainConfig:
     seed: int = 42
-    num_envs: int = 2
+    num_envs: int = 10
     total_updates: int = 2000
     rollout_steps: int = 64
     gamma: float = 0.99

@@ -47,6 +47,7 @@ def encode_observation(
     max_fleets: Optional[int] = None,
     obs_config: Optional[ObsConfig] = None,
     game_config: Optional[GameConfig] = None,
+    episode_steps: int = 500,
 ):
     obs_config = obs_config or DEFAULT_CONFIG.obs
     game_config = game_config or DEFAULT_CONFIG.game
@@ -124,7 +125,7 @@ def encode_observation(
 
     global_features = np.array(
         [
-            step / 500.0,
+            step / max(episode_steps, 1),
             num_my_planets / max_planets,
             num_enemy_planets / max_planets,
             num_neutral / max_planets,

@@ -58,6 +58,24 @@ class OrbitWarsSelfPlayEnv:
     def last_source_ships(self):
         return self._last_source_ships
 
+    def get_opponents_data(self):
+        """Returns list of (opp_idx_in_list, opponent_object, opponent_obs).
+
+        Used for batched opponent inference. Call before step() to collect
+        observations for all opponents, batch their GPU inference, and pass
+        the results back via step(opponent_actions=...).
+        """
+        result = []
+        for opp_idx in range(self.num_players):
+            if opp_idx == self.player_index:
+                continue
+            opp_idx_in_list = opp_idx - 1 if opp_idx > self.player_index else opp_idx
+            if opp_idx_in_list < len(self._opponents):
+                result.append(
+                    (opp_idx_in_list, self._opponents[opp_idx_in_list], self._get_obs(opp_idx))
+                )
+        return result
+
     def set_opponent(self, opponent, index=None):
         if index is not None:
             while len(self._opponents) <= index:
@@ -82,7 +100,15 @@ class OrbitWarsSelfPlayEnv:
         self._last_actions, self._last_source_ships = self._action_builder.build(obs)
         return obs
 
-    def step(self, action_indices):
+    def step(self, action_indices, opponent_actions=None):
+        """Step the environment.
+
+        Args:
+            action_indices: Discrete action indices for the main agent.
+            opponent_actions: Optional dict mapping opp_idx_in_list -> action_list.
+                When provided, skips calling opponent.act() individually and
+                uses the pre-computed actions (enables batched GPU inference).
+        """
         obs = self._get_obs(self.player_index)
         player_id = _get_field(obs, "player", 0)
         my_action = self._action_builder.decode(
@@ -98,13 +124,15 @@ class OrbitWarsSelfPlayEnv:
         for opp_idx in range(self.num_players):
             if opp_idx == self.player_index:
                 continue
-            opp_obs = self._get_obs(opp_idx)
             opp_idx_in_list = opp_idx - 1 if opp_idx > self.player_index else opp_idx
-            if opp_idx_in_list < len(self._opponents):
+            if opponent_actions is not None and opp_idx_in_list in opponent_actions:
+                opp_action = opponent_actions[opp_idx_in_list]
+            elif opp_idx_in_list < len(self._opponents):
+                opp_obs = self._get_obs(opp_idx)
                 opp_action = self._opponents[opp_idx_in_list].act(opp_obs)
-                actions[opp_idx] = opp_action if opp_action else []
             else:
-                actions[opp_idx] = []
+                opp_action = []
+            actions[opp_idx] = opp_action if opp_action else []
         self._env.step(actions)
 
         obs = self._get_obs(self.player_index)
