@@ -178,6 +178,21 @@ class OpponentPool:
             old = self._policy_instances.pop(0)
             del old
 
+    def restore_snapshots(self, snapshots):
+        """Restore pool from a list of CPU state dicts (e.g. from checkpoint)."""
+        self._snapshots = []
+        self._policy_instances = []
+        for cpu_dict in snapshots:
+            self._snapshots.append(cpu_dict)
+            policy = self.policy_factory().to(self.device)
+            policy.load_state_dict(cpu_dict)
+            policy.eval()
+            self._policy_instances.append(policy)
+
+    @property
+    def snapshots(self):
+        return self._snapshots
+
     def sample(self):
         if not self._policy_instances:
             return random.choice([NearestPlanetOpponent(), RandomOpponent()])

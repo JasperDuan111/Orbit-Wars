@@ -32,6 +32,8 @@ def main():
     parser.add_argument("--rollout-steps", type=int, default=config.train.rollout_steps)
     parser.add_argument("--seed", type=int, default=config.train.seed)
     parser.add_argument("--save-dir", type=str, default="checkpoints")
+    parser.add_argument("--resume", type=str, default=None,
+                        help="Path to checkpoint to resume from")
     parser.add_argument("--device", type=str, default=None)
     parser.add_argument("--log-dir", type=str, default=None)
     parser.add_argument("--num-envs", type=int, default=config.train.num_envs)
@@ -106,13 +108,25 @@ def main():
         obs_config=config.obs,
         game_config=config.game,
     )
+
+    start_update = 1
+    if args.resume:
+        print(f"Resuming from {args.resume}")
+        ckpt = torch.load(args.resume, map_location=device, weights_only=False)
+        policy.load_state_dict(ckpt["policy_state_dict"])
+        optimizer.load_state_dict(ckpt["optimizer_state_dict"])
+        start_update = ckpt.get("update", 0) + 1
+        if "pool_snapshots" in ckpt:
+            pool.restore_snapshots(ckpt["pool_snapshots"])
+        print(f"  Restored policy, optimizer, pool.  Starting at update {start_update}")
+
     for env in envs:
         env.set_opponent(pool.sample())
 
     obs_list = [env.reset() for env in envs]
 
     try:
-        for update in range(1, config.train.total_updates + 1):
+        for update in range(start_update, config.train.total_updates + 1):
             buffer.clear()
             for _ in range(config.train.rollout_steps):
                 obs_vec_batch = np.stack(
@@ -243,7 +257,15 @@ def main():
             if update % config.train.save_every == 0:
                 os.makedirs(args.save_dir, exist_ok=True)
                 ckpt_path = os.path.join(args.save_dir, f"ppo_orbit_wars_{update}.pt")
-                torch.save(policy.state_dict(), ckpt_path)
+                torch.save(
+                    {
+                        "policy_state_dict": policy.state_dict(),
+                        "optimizer_state_dict": optimizer.state_dict(),
+                        "update": update,
+                        "pool_snapshots": list(pool.snapshots),
+                    },
+                    ckpt_path,
+                )
                 pool.add(policy.state_dict())
 
             if update % config.train.opponent_refresh == 0:
