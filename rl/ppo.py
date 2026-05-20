@@ -2,7 +2,7 @@ from typing import Optional
 
 import numpy as np
 import torch
-from torch.cuda.amp import autocast, GradScaler
+from torch.amp import autocast, GradScaler
 from torch.nn.utils import clip_grad_norm_
 
 from .action import ActionBuilder, logprob_for_action_sequence
@@ -92,7 +92,7 @@ class PPOTrainer:
         self.batch_size = config.batch_size
         self.device = device
         self.use_amp = use_amp
-        self.scaler = GradScaler() if use_amp else None
+        self.scaler = GradScaler("cuda") if use_amp else None
         self.action_config = action_config or DEFAULT_CONFIG.action
         self.action_builder = ActionBuilder(self.action_config)
         self.max_launches = self.action_config.max_launches_per_source
@@ -109,7 +109,7 @@ class PPOTrainer:
                 self.batch_size
             ):
                 if self.use_amp:
-                    with autocast():
+                    with autocast("cuda"):
                         logits, values = self.policy(obs)
                 else:
                     logits, values = self.policy(obs)

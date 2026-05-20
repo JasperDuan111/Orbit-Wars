@@ -148,7 +148,9 @@ def sample_action_sequence(
         source_actions = actions[src_idx]
         for step_idx in range(max_launches):
             mask = _mask_tensor(source_actions, remaining, device)
-            masked_logits = logits[src_idx].masked_fill(mask == 0, -1e9)
+            masked_logits = logits[src_idx].masked_fill(
+                mask == 0, _mask_fill_value(logits[src_idx].dtype)
+            )
             dist = Categorical(logits=masked_logits)
             if deterministic:
                 action = torch.argmax(masked_logits)
@@ -203,7 +205,9 @@ def logprob_for_action_sequence(
             except (TypeError, ValueError, IndexError):
                 break
             mask = _mask_tensor(source_actions, remaining, device)
-            masked_logits = logits[src_idx].masked_fill(mask == 0, -1e9)
+            masked_logits = logits[src_idx].masked_fill(
+                mask == 0, _mask_fill_value(logits[src_idx].dtype)
+            )
             dist = Categorical(logits=masked_logits)
             action_tensor = torch.tensor(action_idx, device=device)
             logprob_sum = logprob_sum + dist.log_prob(action_tensor)
@@ -247,3 +251,9 @@ def _mask_tensor(
         if ships >= 1:
             mask[idx] = 1.0
     return mask
+
+
+def _mask_fill_value(dtype: torch.dtype) -> float:
+    if dtype.is_floating_point:
+        return torch.finfo(dtype).min
+    return -1e9
