@@ -19,7 +19,7 @@ conda activate OrbitWars
 Install dependencies:
 
 ```bash
-pip install "kaggle-environments>=1.28.0" torch numpy tensorboard
+pip install "kaggle-environments>=1.28.0" torch numpy tensorboard numba box
 ```
 
 Train:

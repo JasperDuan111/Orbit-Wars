@@ -1,0 +1,27 @@
+Metadata-Version: 2.4
+Name: kaggle-environments
+Version: 1.29.3
+Summary: Kaggle Environments
+Author-email: Kaggle <support@kaggle.com>
+Requires-Python: >=3.11
+License-File: LICENSE
+Requires-Dist: Flask >= 1.1.2
+Requires-Dist: gymnasium == 1.2.0
+Requires-Dist: gymnax==0.0.8
+Requires-Dist: jax
+Requires-Dist: jsonschema >= 3.0.1
+Requires-Dist: litellm <= 1.82.4
+Requires-Dist: numpy >= 2.0
+Requires-Dist: open_spiel >= 1.6.13
+Requires-Dist: pettingzoo == 1.24.0
+Requires-Dist: pokerkit==0.6.3
+Requires-Dist: pydantic >= 2.11.4
+Requires-Dist: pygame
+Requires-Dist: pyjson5
+Requires-Dist: termcolor
+Requires-Dist: requests >= 2.25.1
+Requires-Dist: shimmy >= 1.2.1
+Requires-Dist: transformers >= 4.33.1
+Requires-Dist: tenacity
+Requires-Dist: google-auth >= 2.35.0
+Project-URL: Homepage, https://github.com/Kaggle/kaggle-environments

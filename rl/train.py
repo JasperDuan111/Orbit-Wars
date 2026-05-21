@@ -296,6 +296,8 @@ def main():
                     f"update={update} policy_loss={stats['policy_loss']:.4f} "
                     f"value_loss={stats['value_loss']:.4f} entropy={stats['entropy']:.4f}"
                 )
+
+            print(f"current step: {update}")
     finally:
         writer.close()
 
