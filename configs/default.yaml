@@ -28,6 +28,8 @@ reward:
   reward_scale: 0.01
   invalid_action_penalty: 0.05
   terminal_reward_scale: 0.01
+  win_reward: 100.0
+  lose_penalty: -100.0
   planet_control_scale: 10
   production_scale: 1
   survival_reward: 0.01

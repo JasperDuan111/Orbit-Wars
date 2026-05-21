@@ -40,6 +40,8 @@ class OrbitWarsSelfPlayEnv:
         self.reward_scale = reward_config.reward_scale
         self.invalid_action_penalty = reward_config.invalid_action_penalty
         self.terminal_reward_scale = reward_config.terminal_reward_scale
+        self.win_reward = reward_config.win_reward
+        self.lose_penalty = reward_config.lose_penalty
         self.planet_control_scale = reward_config.planet_control_scale
         self.production_scale = reward_config.production_scale
         self.survival_reward = reward_config.survival_reward
@@ -161,6 +163,10 @@ class OrbitWarsSelfPlayEnv:
         done = self._is_done()
         if done:
             reward += diff * self.terminal_reward_scale
+            if diff > 0:
+                reward += self.win_reward
+            elif diff < 0:
+                reward += self.lose_penalty
         elif self.survival_reward:
             reward += self.survival_reward
         self._last_diff = diff

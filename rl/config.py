@@ -65,6 +65,8 @@ class RewardConfig:
     reward_scale: float = 0.01
     invalid_action_penalty: float = 0.05
     terminal_reward_scale: float = 0.01
+    win_reward: float = 100.0
+    lose_penalty: float = -100.0
     planet_control_scale: float = 10
     production_scale: float = 1
     survival_reward: float = 0.01
