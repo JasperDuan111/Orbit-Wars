@@ -1,5 +1,21 @@
+import dataclasses
+
+import yaml
 from dataclasses import dataclass, field
 from typing import Optional, Tuple
+
+
+def _from_dict(cls, data: dict):
+    """Build a dataclass from a dict, using defaults for missing keys."""
+    kwargs = {}
+    for f in dataclasses.fields(cls):
+        if f.name in data:
+            val = data[f.name]
+            origin = getattr(f.type, "__origin__", None)
+            if origin is tuple:
+                val = tuple(val)
+            kwargs[f.name] = val
+    return cls(**kwargs)
 
 
 @dataclass(frozen=True)
@@ -51,7 +67,7 @@ class RewardConfig:
     terminal_reward_scale: float = 0.01
     planet_control_scale: float = 10
     production_scale: float = 1
-    survival_reward: float = 100
+    survival_reward: float = 0.01
 
 
 @dataclass
@@ -99,6 +115,20 @@ class OrbitWarsConfig:
     @property
     def actions_per_source(self) -> int:
         return self.action.actions_per_source
+
+    @classmethod
+    def from_yaml(cls, path: str) -> "OrbitWarsConfig":
+        with open(path, "r", encoding="utf-8") as f:
+            data = yaml.safe_load(f) or {}
+        return cls(
+            game=_from_dict(GameConfig, data.get("game", {})),
+            obs=_from_dict(ObsConfig, data.get("obs", {})),
+            action=_from_dict(ActionSpaceConfig, data.get("action", {})),
+            model=_from_dict(ModelConfig, data.get("model", {})),
+            reward=_from_dict(RewardConfig, data.get("reward", {})),
+            env=_from_dict(EnvConfig, data.get("env", {})),
+            train=_from_dict(TrainConfig, data.get("train", {})),
+        )
 
 
 DEFAULT_CONFIG = OrbitWarsConfig()

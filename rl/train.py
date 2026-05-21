@@ -26,8 +26,21 @@ def set_seed(seed):
 
 
 def main():
+    # Phase 1: peek at --config to decide which defaults to use
+    config_parser = argparse.ArgumentParser(add_help=False)
+    config_parser.add_argument("--config", type=str, default=None,
+                                help="Path to YAML config file")
+    config_args, _ = config_parser.parse_known_args()
+
     config = OrbitWarsConfig()
-    parser = argparse.ArgumentParser(description="Orbit Wars PPO self-play training")
+    if config_args.config:
+        config = OrbitWarsConfig.from_yaml(config_args.config)
+
+    # Phase 2: full argument parsing with defaults from the loaded config
+    parser = argparse.ArgumentParser(
+        description="Orbit Wars PPO self-play training",
+        parents=[config_parser],
+    )
     parser.add_argument("--total-updates", type=int, default=config.train.total_updates)
     parser.add_argument("--rollout-steps", type=int, default=config.train.rollout_steps)
     parser.add_argument("--seed", type=int, default=config.train.seed)

@@ -24,8 +24,7 @@ pip install "kaggle-environments>=1.28.0" torch numpy tensorboard
 
 Train:
 ```bash
-python -m rl.train
-python -m rl.train --resume checkpoints/ppo_orbit_wars_150.pt
+python -m rl.train --config configs/default.yaml --resume checkpoints/ppo_orbit_wars_150.pt
 ```
 
 TensorBoard:

@@ -1,0 +1,57 @@
+# Orbit Wars PPO Training Configuration
+# Usage: python -m rl.train --config configs/default.yaml
+# CLI arguments override values in this file
+
+game:
+  board_size: 100.0
+  center_x: 50.0
+  center_y: 50.0
+
+obs:
+  max_planets: 48
+  max_fleets: 64
+  planet_features: 11
+  fleet_features: 9
+  global_features: 6
+
+action:
+  max_sources: 8
+  max_targets: 20
+  ship_fractions: [0.25, 0.5, 0.75, 1.0]
+  max_launches_per_source: 6
+
+model:
+  hidden_sizes: [512, 512, 256]
+  dropout: 0.1
+
+reward:
+  reward_scale: 0.01
+  invalid_action_penalty: 0.05
+  terminal_reward_scale: 0.01
+  planet_control_scale: 10
+  production_scale: 1
+  survival_reward: 0.01
+
+env:
+  num_players: 2
+  episode_steps: 500
+  act_timeout: 1
+  seed: null
+  debug: false
+
+train:
+  seed: 42
+  num_envs: 10
+  total_updates: 2000
+  rollout_steps: 64
+  gamma: 0.99
+  gae_lambda: 0.95
+  clip_range: 0.2
+  learning_rate: 0.0003
+  ent_coef: 0.01
+  vf_coef: 0.5
+  max_grad_norm: 0.5
+  batch_size: 64
+  epochs: 4
+  save_every: 50
+  opponent_refresh: 10
