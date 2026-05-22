@@ -110,7 +110,7 @@ def swept_pair_hit(Ax, Ay, Bx, By, P0x, P0y, P1x, P1y, r):
 #     t2 = (-b + sq) / (2.0 * a)
 #     return t2 >= 0.0 and t1 <= 1.0
 
-@njit(cache=True)
+@njit(cache=True, nogil=True)
 def compute_fleet_movement_and_collisions(
     fleet_xs,
     fleet_ys,
