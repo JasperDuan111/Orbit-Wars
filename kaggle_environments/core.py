@@ -27,7 +27,7 @@ from typing import Any, Callable
 from . import __version__
 from .agent import Agent
 from .errors import DeadlineExceeded, FailedPrecondition, InvalidArgument
-from .utils import get, get_player, has, process_schema, schemas, structify
+from .utils import Struct, get, get_player, has, process_schema, default_schema, schemas, structify
 
 # Registered Environments.
 environments: dict[str, dict[str, Any]] = {}
@@ -171,6 +171,7 @@ class Environment:
         debug: bool = False,
         state: Any | None = None,
     ) -> None:
+        
         if specification is None:
             specification = {}
         if configuration is None:
@@ -244,35 +245,41 @@ class Environment:
             logs = []
 
         if self.done:
+            # print([s.status for s in self.state])
             raise FailedPrecondition("Environment done, reset required.")
         if not actions or len(actions) != len(self.state):
             raise InvalidArgument(f"{len(self.state)} actions required.")
-
-        action_state = [0] * len(self.state)
+        action_schema = self.__state_schema["properties"]["action"]
+        action_states = []
         for index, action in enumerate(actions):
-            action_state[index] = {**self.state[index], "action": None}
+            new_action_state = self.state[index].copy()
+            new_action_state["action"] = None
 
             if isinstance(action, DeadlineExceeded):
                 self.debug_print(f"Timeout: {str(action)}")
-                action_state[index]["status"] = "TIMEOUT"
+                new_action_state["status"] = "TIMEOUT"
             elif isinstance(action, BaseException):
                 self.debug_print(f"Error: {traceback.format_exception(None, action, action.__traceback__)}")
-                action_state[index]["status"] = "ERROR"
+                new_action_state["status"] = "ERROR"
             else:
-                err, data = process_schema(self.__state_schema.properties.action, action)
-                if err:
-                    self.debug_print(f"Invalid Action: {str(err)}")
-                    action_state[index]["status"] = "INVALID"
+                if not self.debug:
+                    new_action_state["action"] = default_schema(action_schema, action)
                 else:
-                    action_state[index]["action"] = data
+                    err, data = process_schema(action_schema, action)
+                    if err:
+                        self.debug_print(f"Invalid Action: {str(err)}")
+                        new_action_state["status"] = "INVALID"
+                    else:
+                        new_action_state["action"] = data
+            action_states.append(new_action_state)
 
-        self.state = self.__run_interpreter(action_state, logs)
+        self.state = self.__run_interpreter(action_states, logs)
 
         # Max Steps reached. Mark ACTIVE/INACTIVE agents as DONE.
-        if self.state[0].observation.step >= self.configuration.episodeSteps - 1:
+        if self.state[0]["observation"]["step"] >= self.configuration["episodeSteps"] - 1:
             for s in self.state:
-                if s.status == "ACTIVE" or s.status == "INACTIVE":
-                    s.status = "DONE"
+                if s["status"] == "ACTIVE" or s["status"] == "INACTIVE":
+                    s["status"] = "DONE"
 
         self.steps.append(self.state)
         if logs is not None:
@@ -321,14 +328,16 @@ class Environment:
         """
 
         if num_agents is None:
-            num_agents = self.specification.agents[0]
+            num_agents = self.specification["agents"][0]
 
         # Get configuration default state.
-        self.__set_state([{} for _ in range(num_agents)])
+        self.__set_state([Struct({}) for _ in range(num_agents)])
         # Reset all agents to status=INACTIVE (copy out values to reset afterwards).
-        statuses = [a.status for a in self.state]
+        statuses = [a["status"] for a in self.state]
         for agent in self.state:
-            agent.status = "INACTIVE"
+            # print(agent)
+            agent["status"] = "INACTIVE"
+            # print(agent)
         # Give the interpreter an opportunity to make any initializations.
         logs = []
         self.__set_state(self.__run_interpreter(self.state, logs))
@@ -336,7 +345,7 @@ class Environment:
         # Replace the starting "status" if still "done".
         if self.done and len(self.state) == len(statuses):
             for i in range(len(self.state)):
-                self.state[i].status = statuses[i]
+                self.state[i]["status"] = statuses[i]
         return self.state
 
     def render(self, **kwargs: Any) -> str | None:
@@ -601,20 +610,22 @@ class Environment:
     def __loop_through_interpreter(
         self, state: list[dict[str, Any]], logs: list[dict[str, Any]]
     ) -> list[dict[str, Any]]:
-        args = [structify(state), self, logs]
-        new_state = structify(self.interpreter(*args[: self.interpreter.__code__.co_argcount]))
-        new_state[0].observation.step = 0 if self.done else len(self.steps)
+        state = [structify(s) for s in state]
+        args = [state, self, logs]
+        new_state = self.interpreter(*args[: self.interpreter.__code__.co_argcount])
+        new_state[0]["observation"]["step"] = 0 if self.done else len(self.steps)
 
+        shcema_enum = self.__state_schema["properties"]["status"]["enum"]
         for index, agent in enumerate(new_state):
             if index < len(logs) and "duration" in logs[index]:
                 duration = logs[index]["duration"]
                 overage_time_consumed = max(0, duration - self.configuration.actTimeout)
-                agent.observation.remainingOverageTime -= overage_time_consumed
-            if agent.status not in self.__state_schema.properties.status.enum:
+                agent["observation"]["remainingOverageTime"] -= overage_time_consumed
+            if agent["status"] not in shcema_enum:
                 self.debug_print(f"Invalid Action: {agent.status}")
-                agent.status = "INVALID"
-            if agent.status in ["ERROR", "INVALID", "TIMEOUT"]:
-                agent.reward = None
+                agent["status"] = "INVALID"
+            if agent["status"] in ["ERROR", "INVALID", "TIMEOUT"]:
+                agent["reward"] = None
         return new_state
 
     def __run_interpreter_prod(self, state: list[Any], logs: list[dict[str, Any]]) -> list[Any]:
@@ -740,7 +751,7 @@ class Environment:
                     if k in state:
                         del state[k]
                 elif get(prop, bool, path=["shared"], fallback=False):
-                    state[k] = shared_state[k]
+                    state[k] = Struct(shared_state[k])
                 elif has(prop, dict, path=["properties"]):
                     update_props(shared_state[k], state[k], prop["properties"])
             return state

@@ -8,6 +8,8 @@ import numpy as np
 import torch
 from torch.utils.tensorboard import SummaryWriter
 
+from kaggle_environments.utils import Struct
+
 from .action import sample_action_sequence
 from .config import OrbitWarsConfig
 from .envs.orbit_wars_env import OrbitWarsSelfPlayEnv
@@ -146,8 +148,9 @@ def main():
 
     try:
         for update in range(start_update, config.train.total_updates + 1):
+            ct = datetime.now()
             buffer.clear()
-            for _ in range(config.train.rollout_steps):
+            for roll in range(config.train.rollout_steps):
                 obs_vec_batch = np.stack(
                     [
                         encode_observation(
@@ -179,7 +182,7 @@ def main():
                 policy_opponent_items = []
 
                 for i, env in enumerate(envs):
-                    env_actions = {}
+                    env_actions = Struct({})
                     for opp_idx_in_list, opponent, opp_obs in env.get_opponents_data():
                         if isinstance(opponent, PolicyOpponent):
                             policy_opponent_items.append(
@@ -227,6 +230,9 @@ def main():
                         action_indices,
                         opponent_actions=opponent_actions_per_env[i],
                     )
+                    # rendering_html = env._env.render(mode = "html")
+                    # with open(f"./tmp/render_result/new-update-{update}-roll-{roll}-env-{i}.html", "w") as f:
+                    #     f.write(rendering_html)
                     rewards[i] = reward
                     dones[i] = float(done)
 
@@ -297,7 +303,7 @@ def main():
                     f"value_loss={stats['value_loss']:.4f} entropy={stats['entropy']:.4f}"
                 )
 
-            print(f"current step: {update}")
+            print(f"current step: {update}, elapsed time: {datetime.now() - ct}")
     finally:
         writer.close()
 

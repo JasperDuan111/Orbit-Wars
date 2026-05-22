@@ -186,7 +186,7 @@ class OrbitWarsSelfPlayEnv:
         return planet_diff, production_diff
 
     def _get_obs(self, index):
-        return self._env.state[index].observation
+        return self._env.state[index]["observation"]
 
     def _is_done(self):
         if hasattr(self._env, "done"):

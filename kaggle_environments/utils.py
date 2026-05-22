@@ -13,8 +13,6 @@
 # limitations under the License.
 
 import json
-from box import Box
-from box.box_list import BoxList
 from copy import deepcopy
 from pathlib import Path
 from typing import Any, Type
@@ -104,8 +102,10 @@ def call(
 
 
 class Struct(dict):
-    def __init__(self, **entries: Any) -> None:
-        entries = {k: v for k, v in entries.items() if k != "items"}
+    def __init__(self, entries: dict) -> None:
+        if "items" in entries:
+            del entries["items"]
+            
         dict.__init__(self, entries)
         self.__dict__.update(entries)
 
@@ -113,17 +113,19 @@ class Struct(dict):
         self.__dict__[attr] = value
         self[attr] = value
 
+    def __setitem__(self, key: Any, value: Any) -> None:
+        if key == "items": return
+        self.__dict__[key] = value
+        super().__setitem__(key, value)
 
+EXCLUDED_KEYS = frozenset(("planets", "initial_plantes", "fleets", "comets", "comet_planet_ids"))
 # Added benefit of cloning lists and dicts.
 def structify(o: Any) -> Any:
-    if isinstance(o, list):
-        return BoxList(o)
-    return Box(o)
-    # if isinstance(o, list):
-    #     return [structify(o[i]) for i in range(len(o))]
-    # elif isinstance(o, dict):
-    #     return Struct(**{k: structify(v) for k, v in o.items()})
-    # return o
+    if isinstance(o, dict):
+        return Struct({k: structify(v) for k, v in o.items()})
+    if type(o) is list:
+        return [structify(item) for item in o]
+    return o
 
 
 # File Utilities.

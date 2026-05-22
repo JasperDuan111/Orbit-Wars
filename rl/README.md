@@ -19,7 +19,7 @@ conda activate OrbitWars
 Install dependencies:
 
 ```bash
-pip install "kaggle-environments>=1.28.0" torch numpy tensorboard numba box
+pip install "kaggle-environments>=1.28.0" torch numpy tensorboard numba
 ```
 
 Train:
@@ -30,7 +30,7 @@ python -m rl.train --config configs/default.yaml --resume checkpoints/ppo_orbit_
 TensorBoard:
 
 ```bash
-tensorboard --logdir logdir
+tensorboard --logdir <logdir>
 ```
 
 Multi-env + multi-launch example:
