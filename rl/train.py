@@ -41,6 +41,9 @@ def _format_time(seconds: float) -> str:
     else:
         return f"{s:.1f}s"
 
+def _format_result(r: float) -> str:
+    return f"{r:.4f}"
+
 
 class Logger:
     """Write to both console and log file."""
@@ -249,6 +252,8 @@ def main():
     try:
         for update in range(start_update, config.train.total_updates + 1):
             ct = datetime.now()
+            update_start = rollout_start = time.time()
+
             buffer.clear()
             for roll in range(config.train.rollout_steps):
                 obs_vec_batch = np.stack(
@@ -388,16 +393,18 @@ def main():
             writer.add_scalar("train/entropy", stats["entropy"], update)
             writer.add_scalar("train/learning_rate", optimizer.param_groups[0]["lr"], update)
 
+            train_ratio = f"{train_time/update_time*100:.2f}"
             # Log per-step timing
             log_msg = (
-                f"update={update:<6d} | "
-                f"rollout={_format_time(rollout_time):>10s} | "
-                f"train={_format_time(train_time):>10s} | "
-                f"total={_format_time(update_time):>10s} | "
-                f"reward={mean_reward:+.4f} | "
-                f"p_loss={stats['policy_loss']:.4f} | "
-                f"v_loss={stats['value_loss']:.4f} | "
-                f"ent={stats['entropy']:.4f}"
+                f"==============================    Update {update}    ==================================\n"
+                f"rollout{_format_time(rollout_time):>10s} | "
+                f"train{_format_time(train_time):>10s} | "
+                f"total{_format_time(update_time):>11s} | "
+                f"train/total{train_ratio:>7s}% \n"
+                f"reward{_format_result(mean_reward):>11s} | "
+                f"p_loss{_format_result(stats['policy_loss']):>9s} | "
+                f"v_loss{_format_result(stats['value_loss']):>10s} | "
+                f"ent{_format_result(stats['entropy']):>16s} \n"
             )
             print(log_msg)
 
@@ -420,12 +427,6 @@ def main():
                 for env in envs:
                     env.set_opponent(pool.sample())
 
-            print(f"current step: {update}, elapsed time: {datetime.now() - ct}")
-            if update % 10 == 0:
-                print(
-                    f"update={update} policy_loss={stats['policy_loss']:.4f} "
-                    f"value_loss={stats['value_loss']:.4f} entropy={stats['entropy']:.4f}"
-                )
     finally:
         total_time = time.time() - total_start_time
         avg_time = total_time / max(update - start_update + 1, 1)

@@ -54,31 +54,32 @@ PROJECT_ROOT = os.path.abspath(os.path.join("..", _script_dir))
 # Register Environments.
 
 for name in listdir(utils.envs_path):
-    try:
-        env = import_module(f".envs.{name}.{name}", __name__)
-        if name == "open_spiel_env":
-            for env_name, env_dict in env.ENV_REGISTRY.items():
+    if "orbit_wars" in name:
+        try:
+            env = import_module(f".envs.{name}.{name}", __name__)
+            if name == "open_spiel_env":
+                for env_name, env_dict in env.ENV_REGISTRY.items():
+                    register(
+                        env_name,
+                        {
+                            "agents": env_dict.get("agents"),
+                            "html_renderer": env_dict.get("html_renderer"),
+                            "interpreter": env_dict.get("interpreter"),
+                            "renderer": env_dict.get("renderer"),
+                            "specification": env_dict.get("specification"),
+                        },
+                    )
+            else:
                 register(
-                    env_name,
+                    name,
                     {
-                        "agents": env_dict.get("agents"),
-                        "html_renderer": env_dict.get("html_renderer"),
-                        "interpreter": env_dict.get("interpreter"),
-                        "renderer": env_dict.get("renderer"),
-                        "specification": env_dict.get("specification"),
+                        "agents": getattr(env, "agents", []),
+                        "html_renderer": getattr(env, "html_renderer", None),
+                        "interpreter": getattr(env, "interpreter"),
+                        "renderer": getattr(env, "renderer"),
+                        "specification": getattr(env, "specification"),
                     },
                 )
-        else:
-            register(
-                name,
-                {
-                    "agents": getattr(env, "agents", []),
-                    "html_renderer": getattr(env, "html_renderer", None),
-                    "interpreter": getattr(env, "interpreter"),
-                    "renderer": getattr(env, "renderer"),
-                    "specification": getattr(env, "specification"),
-                },
-            )
-    except Exception as e:
-        if "football" not in name:
-            print("Loading environment %s failed: %s" % (name, e))
+        except Exception as e:
+            if "football" not in name:
+                print("Loading environment %s failed: %s" % (name, e))
