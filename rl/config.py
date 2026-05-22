@@ -55,9 +55,19 @@ class ActionSpaceConfig:
 
 
 @dataclass(frozen=True)
+class GNNConfig:
+    hg: int = 128
+    hf: int = 128
+    ha: int = 64
+    num_gcn_layers: int = 2
+
+
+@dataclass(frozen=True)
 class ModelConfig:
+    model_type: str = "mlp"  # "mlp" or "gnn"
     hidden_sizes: Tuple[int, ...] = (512, 512, 256)
     dropout: float = 0.1
+    gnn: GNNConfig = field(default_factory=GNNConfig)
 
 
 @dataclass
@@ -122,11 +132,16 @@ class OrbitWarsConfig:
     def from_yaml(cls, path: str) -> "OrbitWarsConfig":
         with open(path, "r", encoding="utf-8") as f:
             data = yaml.safe_load(f) or {}
+        model_data = data.get("model", {})
+        gnn_data = model_data.pop("gnn", {})
         return cls(
             game=_from_dict(GameConfig, data.get("game", {})),
             obs=_from_dict(ObsConfig, data.get("obs", {})),
             action=_from_dict(ActionSpaceConfig, data.get("action", {})),
-            model=_from_dict(ModelConfig, data.get("model", {})),
+            model=ModelConfig(
+                **_from_dict(ModelConfig, model_data).__dict__,
+                gnn=_from_dict(GNNConfig, gnn_data),
+            ),
             reward=_from_dict(RewardConfig, data.get("reward", {})),
             env=_from_dict(EnvConfig, data.get("env", {})),
             train=_from_dict(TrainConfig, data.get("train", {})),
