@@ -74,3 +74,43 @@ update=64     | rollout=     13.7s | train=      8.5s | total=     22.2s | rewar
 update=65     | rollout=     16.8s | train=     15.9s | total=     32.7s | reward=+0.7698 | p_loss=6.5265 | v_loss=619.3237 | ent=25.6182
 update=66     | rollout=     23.0s | train=     22.6s | total=     45.7s | reward=-0.2730 | p_loss=12.7633 | v_loss=415.6488 | ent=45.2975
 update=67     | rollout=     26.3s | train=     31.1s | total=     57.3s | reward=+0.1650 | p_loss=932200.3838 | v_loss=528.6932 | ent=61.8908
+update=68     | rollout=     31.8s | train=     31.3s | total=  1min3.2s | reward=-0.4960 | p_loss=8248237097035949.0000 | v_loss=710.6121 | ent=63.9230
+update=69     | rollout=     29.9s | train=     37.5s | total=  1min7.4s | reward=-0.2219 | p_loss=1314424636593565.2500 | v_loss=756.9248 | ent=61.7997
+update=70     | rollout=     31.6s | train=     26.3s | total=     57.9s | reward=+1.2096 | p_loss=6529153.0738 | v_loss=1310.3580 | ent=53.4316
+update=71     | rollout=     18.3s | train=     23.9s | total=     42.2s | reward=-0.6244 | p_loss=109143.0572 | v_loss=774.2496 | ent=47.6781
+update=72     | rollout=     13.4s | train=     21.8s | total=     35.2s | reward=-0.0590 | p_loss=551.8365 | v_loss=381.2273 | ent=44.8885
+update=73     | rollout=     17.5s | train=     21.2s | total=     38.7s | reward=+0.2583 | p_loss=15.3907 | v_loss=402.4920 | ent=41.3164
+update=74     | rollout=     24.1s | train=     28.1s | total=     52.2s | reward=+0.0936 | p_loss=5531.2856 | v_loss=779.0131 | ent=47.2597
+update=75     | rollout=     29.8s | train=     33.0s | total=  1min2.8s | reward=+0.6966 | p_loss=90573730081.7264 | v_loss=553.5873 | ent=57.8834
+update=76     | rollout=     29.5s | train=     38.4s | total=  1min7.9s | reward=+0.5745 | p_loss=373.5592 | v_loss=1191.7031 | ent=65.7386
+update=77     | rollout=     29.9s | train=     43.1s | total= 1min13.0s | reward=+1.3523 | p_loss=207511108.6899 | v_loss=755.9741 | ent=76.4541
+update=78     | rollout=     27.4s | train=     41.8s | total=  1min9.2s | reward=+1.7541 | p_loss=27.2345 | v_loss=978.1112 | ent=74.1025
+update=79     | rollout=     19.9s | train=     28.6s | total=     48.5s | reward=+0.3933 | p_loss=95496.3919 | v_loss=181.8169 | ent=50.8154
+update=80     | rollout=     23.1s | train=     27.0s | total=     50.1s | reward=+1.2032 | p_loss=1134.0927 | v_loss=961.5254 | ent=46.5558
+update=81     | rollout=     30.3s | train=     29.7s | total=     60.0s | reward=+0.1511 | p_loss=390682767623626424320.0000 | v_loss=1529.1994 | ent=51.8938
+update=82     | rollout=     27.5s | train=     21.2s | total=     48.7s | reward=-1.1304 | p_loss=177629662081953769168306176.0000 | v_loss=1052.2936 | ent=36.7055
+update=83     | rollout=     19.8s | train=     13.6s | total=     33.4s | reward=+0.1624 | p_loss=1945448110588002304.0000 | v_loss=287.7043 | ent=24.0961
+update=84     | rollout=     14.6s | train=     12.5s | total=     27.1s | reward=+0.2538 | p_loss=387.1232 | v_loss=1056.5483 | ent=21.8885
+update=85     | rollout=      9.6s | train=      9.6s | total=     19.2s | reward=-0.6237 | p_loss=38.5900 | v_loss=377.2749 | ent=16.9029
+update=86     | rollout=     17.5s | train=     25.7s | total=     43.3s | reward=+0.3034 | p_loss=17.5356 | v_loss=383.8086 | ent=45.3545
+update=87     | rollout=     29.4s | train=     28.5s | total=     58.0s | reward=-0.7478 | p_loss=523160779693740992.0000 | v_loss=1267.1788 | ent=49.5277
+update=88     | rollout=     31.4s | train=     23.3s | total=     54.7s | reward=+0.5409 | p_loss=24605331496815132934144.0000 | v_loss=823.6715 | ent=45.0938
+update=89     | rollout=     29.9s | train=     25.7s | total=     55.6s | reward=-0.2601 | p_loss=2281.5716 | v_loss=567.9619 | ent=44.6288
+update=90     | rollout=     21.2s | train=     27.1s | total=     48.4s | reward=+0.3805 | p_loss=4784.7002 | v_loss=204.9242 | ent=47.9505
+update=91     | rollout=     18.1s | train=     24.8s | total=     42.9s | reward=+0.0849 | p_loss=1578386.5611 | v_loss=1149.6175 | ent=50.9328
+update=92     | rollout=     11.1s | train=      7.0s | total=     18.1s | reward=-0.1251 | p_loss=34150862022599073972606763794432.0000 | v_loss=847.4346 | ent=13.5252
+update=93     | rollout=     15.4s | train=     14.0s | total=     29.5s | reward=-0.0526 | p_loss=5594817565.4763 | v_loss=283.5044 | ent=27.7857
+update=94     | rollout=     27.2s | train=     26.8s | total=     54.0s | reward=-0.4704 | p_loss=46327.9636 | v_loss=731.5894 | ent=47.9570
+update=95     | rollout=     33.7s | train=     35.8s | total=  1min9.6s | reward=-0.5178 | p_loss=6701470.7848 | v_loss=682.4159 | ent=64.1514
+update=96     | rollout=     36.7s | train=     35.6s | total= 1min12.4s | reward=+0.7225 | p_loss=40804.0557 | v_loss=666.2858 | ent=73.7967
+update=97     | rollout=     36.8s | train=     35.5s | total= 1min12.3s | reward=+0.3187 | p_loss=4004568548.7155 | v_loss=1354.0614 | ent=74.8283
+update=98     | rollout=     34.6s | train=     34.3s | total=  1min8.9s | reward=-1.6016 | p_loss=538301115786192576.0000 | v_loss=1259.8345 | ent=60.5526
+update=99     | rollout=     23.5s | train=     16.5s | total=     40.0s | reward=+1.5370 | p_loss=983188.9257 | v_loss=911.1521 | ent=34.0880
+update=100    | rollout=      7.6s | train=      6.7s | total=     14.3s | reward=-0.2882 | p_loss=0.1894 | v_loss=499.2750 | ent=13.4693
+
+------------------------------------------------------------
+Training finished at: 2026-05-22 20:34:55
+Total updates: 100
+Total time: 1h13min55.3s
+Average per update: 44.4s
+------------------------------------------------------------
