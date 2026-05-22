@@ -1,6 +1,8 @@
 import argparse
 import os
 import random
+import sys
+import time
 from dataclasses import replace
 from datetime import datetime
 
@@ -13,7 +15,7 @@ from kaggle_environments.utils import Struct
 from .action import sample_action_sequence
 from .config import OrbitWarsConfig
 from .envs.orbit_wars_env import OrbitWarsSelfPlayEnv
-from .models import ActorCritic
+from .models import ActorCritic, ActorCriticGNN
 from .obs import encode_observation
 from .opponents import OpponentPool, NearestPlanetOpponent, PolicyOpponent
 from .ppo import RolloutBuffer, PPOTrainer
@@ -27,8 +29,41 @@ def set_seed(seed):
         torch.cuda.manual_seed_all(seed)
 
 
+def _format_time(seconds: float) -> str:
+    """Format seconds as *h*min*s."""
+    h = int(seconds // 3600)
+    m = int((seconds % 3600) // 60)
+    s = seconds % 60
+    if h > 0:
+        return f"{h}h{m:02d}min{s:.1f}s"
+    elif m > 0:
+        return f"{m}min{s:.1f}s"
+    else:
+        return f"{s:.1f}s"
+
+
+class Logger:
+    """Write to both console and log file."""
+    def __init__(self, log_file: str):
+        self.console = sys.stdout
+        os.makedirs(os.path.dirname(log_file), exist_ok=True)
+        self.file = open(log_file, "w", encoding="utf-8")
+
+    def write(self, message):
+        self.console.write(message)
+        self.file.write(message)
+        self.file.flush()
+
+    def flush(self):
+        self.console.flush()
+        self.file.flush()
+
+    def close(self):
+        self.file.close()
+
+
 def main():
-    # Phase 1: peek at --config to decide which defaults to use
+    # Parse config
     config_parser = argparse.ArgumentParser(add_help=False)
     config_parser.add_argument("--config", type=str, default=None,
                                 help="Path to YAML config file")
@@ -38,7 +73,6 @@ def main():
     if config_args.config:
         config = OrbitWarsConfig.from_yaml(config_args.config)
 
-    # Phase 2: full argument parsing with defaults from the loaded config
     parser = argparse.ArgumentParser(
         description="Orbit Wars PPO self-play training",
         parents=[config_parser],
@@ -52,6 +86,18 @@ def main():
     parser.add_argument("--device", type=str, default=None)
     parser.add_argument("--log-dir", type=str, default=None)
     parser.add_argument("--num-envs", type=int, default=config.train.num_envs)
+    parser.add_argument("--model-type", type=str, default=config.model.model_type,
+                        choices=["mlp", "gnn"],
+                        help="Model type: mlp (baseline) or gnn (GNN+Attention)")
+    parser.add_argument("--epochs", type=int, default=config.train.epochs)
+    parser.add_argument("--batch-size", type=int, default=config.train.batch_size)
+    parser.add_argument("--save-every", type=int, default=config.train.save_every)
+    parser.add_argument("--opponent-refresh", type=int, default=config.train.opponent_refresh)
+    parser.add_argument("--learning-rate", type=float, default=config.train.learning_rate)
+    parser.add_argument("--save-final-dir", type=str, default=None,
+                        help="Save final model to this directory (auto-named as YYYYMMDD_{model_type}.pt)")
+    parser.add_argument("--cleanup-checkpoints", action="store_true", default=False,
+                        help="Delete checkpoint dir after saving final model")
     parser.add_argument(
         "--max-launches-per-source",
         type=int,
@@ -63,6 +109,11 @@ def main():
     config.train.rollout_steps = args.rollout_steps
     config.train.seed = args.seed
     config.train.num_envs = args.num_envs
+    config.train.epochs = args.epochs
+    config.train.batch_size = args.batch_size
+    config.train.save_every = args.save_every
+    config.train.opponent_refresh = args.opponent_refresh
+    config.train.learning_rate = args.learning_rate
     config.action = replace(
         config.action, max_launches_per_source=args.max_launches_per_source
     )
@@ -77,11 +128,31 @@ def main():
 
     set_seed(config.train.seed)
 
-    log_dir = args.log_dir or os.path.join(
-        "runs", "OrbitWars", datetime.now().strftime("%Y%m%d_%H%M%S")
-    )
-    writer = SummaryWriter(log_dir=log_dir)
+    # Setup logging
+    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    log_dir = os.path.join(project_root, "log")
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    log_file = os.path.join(log_dir, f"train_{timestamp}.log")
+    logger = Logger(log_file)
+    sys.stdout = logger
 
+    print(f"Log file: {log_file}")
+    print(f"Model type: {args.model_type}")
+    print(f"Device: {device}")
+    print(f"AMP: {use_amp}")
+    print(f"Config: total_updates={config.train.total_updates}, "
+          f"num_envs={config.train.num_envs}, "
+          f"rollout_steps={config.train.rollout_steps}")
+    print(f"Start time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print()
+
+    # TensorBoard
+    tb_log_dir = args.log_dir or os.path.join(
+        "runs", "OrbitWars", timestamp
+    )
+    writer = SummaryWriter(log_dir=tb_log_dir)
+
+    # Create envs
     envs = [
         OrbitWarsSelfPlayEnv(
             opponent=NearestPlanetOpponent(),
@@ -92,12 +163,28 @@ def main():
         for i in range(config.train.num_envs)
     ]
 
-    policy = ActorCritic(
-        config.obs.obs_dim,
-        config.action.actions_per_source,
-        config.action.max_sources,
-        model_config=config.model,
-    ).to(device)
+    # Create model
+    if args.model_type == "gnn":
+        policy = ActorCriticGNN(
+            obs_config=config.obs,
+            actions_per_source=config.action.actions_per_source,
+            max_sources=config.action.max_sources,
+            model_config=config.model,
+        ).to(device)
+    else:
+        policy = ActorCritic(
+            config.obs.obs_dim,
+            config.action.actions_per_source,
+            config.action.max_sources,
+            model_config=config.model,
+        ).to(device)
+
+    # Parameter count
+    total_params = sum(p.numel() for p in policy.parameters())
+    trainable_params = sum(p.numel() for p in policy.parameters() if p.requires_grad)
+    print(f"Model parameters: {total_params:,} total, {trainable_params:,} trainable")
+    print()
+
     optimizer = torch.optim.Adam(policy.parameters(), lr=config.train.learning_rate)
     trainer = PPOTrainer(policy, optimizer, config.train, device,
                          action_config=config.action, use_amp=use_amp)
@@ -110,13 +197,25 @@ def main():
         device,
     )
 
+    # Opponent pool
+    def _make_policy():
+        if args.model_type == "gnn":
+            return ActorCriticGNN(
+                obs_config=config.obs,
+                actions_per_source=config.action.actions_per_source,
+                max_sources=config.action.max_sources,
+                model_config=config.model,
+            )
+        else:
+            return ActorCritic(
+                config.obs.obs_dim,
+                config.action.actions_per_source,
+                config.action.max_sources,
+                model_config=config.model,
+            )
+
     pool = OpponentPool(
-        lambda: ActorCritic(
-            config.obs.obs_dim,
-            config.action.actions_per_source,
-            config.action.max_sources,
-            model_config=config.model,
-        ),
+        _make_policy,
         capacity=5,
         device=device,
         action_config=config.action,
@@ -129,7 +228,6 @@ def main():
         print(f"Resuming from {args.resume}")
         ckpt = torch.load(args.resume, map_location=device, weights_only=False)
         if isinstance(ckpt, dict) and "policy_state_dict" in ckpt:
-            # New format: full checkpoint with metadata
             policy.load_state_dict(ckpt["policy_state_dict"])
             optimizer.load_state_dict(ckpt["optimizer_state_dict"])
             start_update = ckpt.get("update", 0) + 1
@@ -137,7 +235,6 @@ def main():
                 pool.restore_snapshots(ckpt["pool_snapshots"])
             print(f"  Restored policy, optimizer, pool.  Starting at update {start_update}")
         else:
-            # Old format: raw state_dict only (no optimizer / pool / update)
             policy.load_state_dict(ckpt)
             print("  Old-format checkpoint — only policy restored.  Starting at update 1")
 
@@ -145,6 +242,9 @@ def main():
         env.set_opponent(pool.sample())
 
     obs_list = [env.reset() for env in envs]
+
+    # Training loop
+    total_start_time = time.time()
 
     try:
         for update in range(start_update, config.train.total_updates + 1):
@@ -177,7 +277,7 @@ def main():
                 )
                 logprobs_batch = torch.zeros((config.train.num_envs,), device=device)
 
-                # --- Batch opponent inference ---
+                # Batch opponent inference
                 opponent_actions_per_env = []
                 policy_opponent_items = []
 
@@ -254,6 +354,9 @@ def main():
 
                 obs_list = next_obs_list
 
+            rollout_time = time.time() - rollout_start
+
+            # -- GAE computation --
             last_obs_vec = np.stack(
                 [
                     encode_observation(
@@ -270,8 +373,14 @@ def main():
                 last_values.squeeze(-1), config.train.gamma, config.train.gae_lambda
             )
 
+            # -- Training --
+            train_start = time.time()
             stats = trainer.update(buffer)
+            train_time = time.time() - train_start
 
+            update_time = time.time() - update_start
+
+            # Logging & TensorBoard
             mean_reward = float(buffer.rewards.mean().item())
             writer.add_scalar("train/reward_mean", mean_reward, update)
             writer.add_scalar("train/policy_loss", stats["policy_loss"], update)
@@ -279,6 +388,20 @@ def main():
             writer.add_scalar("train/entropy", stats["entropy"], update)
             writer.add_scalar("train/learning_rate", optimizer.param_groups[0]["lr"], update)
 
+            # Log per-step timing
+            log_msg = (
+                f"update={update:<6d} | "
+                f"rollout={_format_time(rollout_time):>10s} | "
+                f"train={_format_time(train_time):>10s} | "
+                f"total={_format_time(update_time):>10s} | "
+                f"reward={mean_reward:+.4f} | "
+                f"p_loss={stats['policy_loss']:.4f} | "
+                f"v_loss={stats['value_loss']:.4f} | "
+                f"ent={stats['entropy']:.4f}"
+            )
+            print(log_msg)
+
+            # Save & opponent refresh
             if update % config.train.save_every == 0:
                 os.makedirs(args.save_dir, exist_ok=True)
                 ckpt_path = os.path.join(args.save_dir, f"ppo_orbit_wars_{update}.pt")
@@ -297,15 +420,52 @@ def main():
                 for env in envs:
                     env.set_opponent(pool.sample())
 
+            print(f"current step: {update}, elapsed time: {datetime.now() - ct}")
             if update % 10 == 0:
                 print(
                     f"update={update} policy_loss={stats['policy_loss']:.4f} "
                     f"value_loss={stats['value_loss']:.4f} entropy={stats['entropy']:.4f}"
                 )
-
-            print(f"current step: {update}, elapsed time: {datetime.now() - ct}")
     finally:
+        total_time = time.time() - total_start_time
+        avg_time = total_time / max(update - start_update + 1, 1)
+
+        print()
+        print("-" * 60)
+        print(f"Training finished at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        print(f"Total updates: {update}")
+        print(f"Total time: {_format_time(total_time)}")
+        print(f"Average per update: {_format_time(avg_time)}")
+        print("-" * 60)
+
         writer.close()
+        sys.stdout = logger.console
+        logger.close()
+        print(f"Log saved to: {log_file}")
+
+        # Save final model and optionally clean up checkpoints
+        if args.save_final_dir:
+            os.makedirs(args.save_final_dir, exist_ok=True)
+            date_str = datetime.now().strftime("%Y%m%d")
+            final_name = f"{date_str}_{args.model_type}.pt"
+            final_path = os.path.join(args.save_final_dir, final_name)
+            torch.save(
+                {
+                    "policy_state_dict": policy.state_dict(),
+                    "optimizer_state_dict": optimizer.state_dict(),
+                    "update": update,
+                    "pool_snapshots": list(pool.snapshots),
+                },
+                final_path,
+            )
+            print(f"Final model saved to: {final_path}")
+
+        if args.cleanup_checkpoints:
+            save_dir = os.path.abspath(args.save_dir)
+            if os.path.isdir(save_dir):
+                import shutil
+                shutil.rmtree(save_dir)
+                print(f"Cleaned up checkpoints: {save_dir}")
 
 
 if __name__ == "__main__":

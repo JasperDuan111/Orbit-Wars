@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-from .config import DEFAULT_CONFIG, ModelConfig
+from .config import DEFAULT_CONFIG, ModelConfig, GNNConfig, ObsConfig
 
 
 def _build_mlp(input_dim, hidden_sizes, output_dim, dropout):
@@ -16,6 +16,7 @@ def _build_mlp(input_dim, hidden_sizes, output_dim, dropout):
     return nn.Sequential(*layers)
 
 
+# MLP baseline model (preserved for comparison)
 class ActorCritic(nn.Module):
     def __init__(
         self,
@@ -43,4 +44,142 @@ class ActorCritic(nn.Module):
         logits = self.policy_head(features)
         logits = logits.view(-1, self.max_sources, self.actions_per_source)
         value = self.value_head(features)
+        return logits, value
+
+
+# GNN + Self-Attention + Cross-Attention model
+class ActorCriticGNN(nn.Module):
+    def __init__(
+        self,
+        obs_config: ObsConfig,
+        actions_per_source: int,
+        max_sources: int,
+        model_config: ModelConfig = None,
+        gnn_config: GNNConfig = None,
+    ):
+        super().__init__()
+        config = model_config or DEFAULT_CONFIG.model
+        gnn_cfg = gnn_config or config.gnn
+
+        self.max_planets = obs_config.max_planets
+        self.max_fleets = obs_config.max_fleets
+        self.planet_features = obs_config.planet_features
+        self.fleet_features = obs_config.fleet_features
+        self.global_features = obs_config.global_features
+        self.actions_per_source = actions_per_source
+        self.max_sources = max_sources
+
+        self.hg = gnn_cfg.hg
+        self.hf = gnn_cfg.hf
+        self.ha = gnn_cfg.ha
+        self.num_gcn_layers = gnn_cfg.num_gcn_layers
+        self.dropout = config.dropout
+
+        # 2.1 Learnable adjacency matrix weight
+        self.Wa = nn.Linear(self.planet_features, self.planet_features, bias=False)
+
+        # 2.2 Graph convolution layers
+        self.gcn_layers = nn.ModuleList()
+        in_dim = self.planet_features
+        for _ in range(self.num_gcn_layers):
+            self.gcn_layers.append(nn.Sequential(
+                nn.Linear(in_dim, self.hg),
+                nn.LayerNorm(self.hg),
+                nn.GELU(),
+                nn.Dropout(self.dropout),
+            ))
+            in_dim = self.hg
+
+        # 3. Fleet self-attention QKV projections
+        self.fleet_q = nn.Linear(self.fleet_features, self.hf)
+        self.fleet_k = nn.Linear(self.fleet_features, self.hf)
+        self.fleet_v = nn.Linear(self.fleet_features, self.hf)
+
+        # 4. Cross-attention QKV projections
+        self.cross_q = nn.Linear(self.hg, self.ha)
+        self.cross_k = nn.Linear(self.hf, self.ha)
+        self.cross_v = nn.Linear(self.hf, self.ha)
+
+        # 4.3 Residual projection
+        self.Wp = nn.Linear(self.ha, self.hg)
+
+        # 5. Output heads (after mean-pooling over N1 planet dimension)
+        self.policy_head = nn.Sequential(
+            nn.Linear(self.hg, self.hg),
+            nn.LayerNorm(self.hg),
+            nn.GELU(),
+            nn.Linear(self.hg, max_sources * actions_per_source),
+        )
+        self.value_head = nn.Sequential(
+            nn.Linear(self.hg, self.hg),
+            nn.LayerNorm(self.hg),
+            nn.GELU(),
+            nn.Linear(self.hg, 1),
+        )
+
+    def forward(self, obs_flat):
+        B = obs_flat.shape[0]
+
+        # Split flat observation into structured tensors
+        planet_dim = self.max_planets * self.planet_features
+        fleet_dim = self.max_fleets * self.fleet_features
+
+        planet_flat = obs_flat[:, :planet_dim]
+        fleet_flat = obs_flat[:, planet_dim:planet_dim + fleet_dim]
+        global_feat = obs_flat[:, planet_dim + fleet_dim:]
+
+        Zp = planet_flat.reshape(B, self.max_planets, self.planet_features)
+        Zf = fleet_flat.reshape(B, self.max_fleets, self.fleet_features)
+
+        # Masks: distinguish real entities from zero-padding
+        planet_mask = (Zp.abs().sum(dim=-1) > 1e-6).float()
+        fleet_mask = (Zf.abs().sum(dim=-1) > 1e-6).float()
+
+        # -- 2. Planet GNN --
+        Zp_t = self.Wa(Zp)
+        Ag = torch.bmm(Zp_t, Zp_t.transpose(1, 2))
+
+        # Mask and row-wise softmax normalization
+        mask_2d = planet_mask.unsqueeze(1) * planet_mask.unsqueeze(2)
+        Ag = Ag.masked_fill(mask_2d == 0, float('-inf'))
+        Ag = torch.softmax(Ag, dim=-1).nan_to_num(0)
+
+        # Graph convolution
+        for gcn in self.gcn_layers:
+            Zp = gcn(torch.bmm(Ag, Zp))
+
+        # -- 3. Fleet self-attention --
+        Qf = self.fleet_q(Zf)
+        Kf = self.fleet_k(Zf)
+        Vf = self.fleet_v(Zf)
+
+        attn_f = torch.bmm(Qf, Kf.transpose(1, 2)) / (self.hf ** 0.5)
+        f_mask_2d = fleet_mask.unsqueeze(1) * fleet_mask.unsqueeze(2)
+        attn_f = attn_f.masked_fill(f_mask_2d == 0, float('-inf'))
+        attn_f = torch.softmax(attn_f, dim=-1).nan_to_num(0)
+        Zf = torch.bmm(attn_f, Vf)
+
+        # -- 4. Cross-attention: planets attend to fleets --
+        Q = self.cross_q(Zp)
+        K = self.cross_k(Zf)
+        V = self.cross_v(Zf)
+
+        attn_c = torch.bmm(Q, K.transpose(1, 2)) / (self.ha ** 0.5)
+        c_mask = planet_mask.unsqueeze(2) * fleet_mask.unsqueeze(1)
+        attn_c = attn_c.masked_fill(c_mask == 0, float('-inf'))
+        attn_c = torch.softmax(attn_c, dim=-1).nan_to_num(0)
+        Za = torch.bmm(attn_c, V)
+
+        # 4.3 Residual connection
+        Z = self.Wp(Za) + Zp
+
+        # -- 5. Output heads (mean-pool over planets, then feed to MLP) --
+        Z_pooled = (Z * planet_mask.unsqueeze(-1)).sum(dim=1) / (
+            planet_mask.sum(dim=1, keepdim=True) + 1e-8
+        )
+
+        logits = self.policy_head(Z_pooled)
+        logits = logits.view(-1, self.max_sources, self.actions_per_source)
+        value = self.value_head(Z_pooled)
+
         return logits, value
