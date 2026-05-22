@@ -4,8 +4,10 @@
 
 设：
 
-- **星球特征**：$$Z_p \in \mathbb{R}^{N_1 \times F_p^*}$$
-- **舰队特征**：$$Z_f \in \mathbb{R}^{N_2 \times F_f^*}$$
+- **星球特征**：
+  $$Z_p \in \mathbb{R}^{N_1 \times F_p^*}$$
+- **舰队特征**：
+  $$Z_f \in \mathbb{R}^{N_2 \times F_f^*}$$
 
 其中 $F_p^*$ 和 $F_f^*$ 表示所有特征的缩略记号，$N_1$ 和 $N_2$ 分别为当前时间步的星球数量和舰队数量。
 
