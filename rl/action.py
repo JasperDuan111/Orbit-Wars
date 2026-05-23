@@ -146,8 +146,13 @@ def sample_action_sequence(
         if remaining <= 0:
             continue
         source_actions = actions[src_idx]
+        fractions = [
+            (a.fraction if a is not None else -1.0) 
+            for a in source_actions
+        ]
+        frac_tensor = torch.tensor(fractions, dtype=torch.float32, device=device)
         for step_idx in range(max_launches):
-            mask = _mask_tensor(source_actions, remaining, device)
+            mask = _mask_tensor(frac_tensor, remaining, device)
             masked_logits = logits[src_idx].masked_fill(
                 mask == 0, _mask_fill_value(logits[src_idx].dtype)
             )
@@ -199,12 +204,17 @@ def logprob_for_action_sequence(
         if remaining <= 0:
             continue
         source_actions = actions[src_idx]
+        fractions = [
+            (a.fraction if a is not None else -1.0) 
+            for a in source_actions
+        ]
+        frac_tensor = torch.tensor(fractions, dtype=torch.float32, device=device)
         for step_idx in range(max_launches):
             try:
                 action_idx = int(action_indices[src_idx, step_idx].item())
             except (TypeError, ValueError, IndexError):
                 break
-            mask = _mask_tensor(source_actions, remaining, device)
+            mask = _mask_tensor(frac_tensor, remaining, device)
             masked_logits = logits[src_idx].masked_fill(
                 mask == 0, _mask_fill_value(logits[src_idx].dtype)
             )
@@ -235,14 +245,26 @@ def _ships_to_send(remaining_ships: int, fraction: float) -> int:
 
 
 def _mask_tensor(
-    source_actions: Sequence[Optional[ActionTemplate]],
+    # source_actions: Sequence[Optional[ActionTemplate]],
+    source_actions: torch.Tensor,
     remaining_ships: int,
     device: torch.device,
 ) -> torch.Tensor:
-    mask = torch.zeros((len(source_actions),), dtype=torch.float32, device=device)
-    mask[0] = 1.0
     if remaining_ships <= 0:
+        mask = torch.zeros(len(source_actions), dtype=torch.float32, device=device)
+        mask[0] = 1.0
         return mask
+    
+    # mask = torch.zeros((len(source_actions),), dtype=torch.float32, device=device)
+    # mask[0] = 1.0
+    # if remaining_ships <= 0:
+    #     return mask
+
+    mask = (remaining_ships * source_actions > 0.0).to(torch.float32)
+    mask[0] = 1.0
+
+    return mask
+
     for idx in range(1, len(source_actions)):
         template = source_actions[idx]
         if template is None:
@@ -250,6 +272,7 @@ def _mask_tensor(
         ships = _ships_to_send(remaining_ships, template.fraction)
         if ships >= 1:
             mask[idx] = 1.0
+    
     return mask
 
 
