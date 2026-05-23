@@ -134,12 +134,14 @@ class OrbitWarsConfig:
             data = yaml.safe_load(f) or {}
         model_data = data.get("model", {})
         gnn_data = model_data.pop("gnn", {})
+        model_dict = _from_dict(ModelConfig, model_data).__dict__
+        model_dict.pop("gnn", None)  # remove default; replaced by parsed gnn_data
         return cls(
             game=_from_dict(GameConfig, data.get("game", {})),
             obs=_from_dict(ObsConfig, data.get("obs", {})),
             action=_from_dict(ActionSpaceConfig, data.get("action", {})),
             model=ModelConfig(
-                **_from_dict(ModelConfig, model_data).__dict__,
+                **model_dict,
                 gnn=_from_dict(GNNConfig, gnn_data),
             ),
             reward=_from_dict(RewardConfig, data.get("reward", {})),
