@@ -27,7 +27,7 @@ from typing import Any, Callable
 from . import __version__
 from .agent import Agent
 from .errors import DeadlineExceeded, FailedPrecondition, InvalidArgument
-from .utils import Struct, get, get_player, has, process_schema, default_schema, schemas, structify
+from .utils import Struct, default_schema_wo_structify, get, get_player, has, process_schema, schemas, structify
 
 # Registered Environments.
 environments: dict[str, dict[str, Any]] = {}
@@ -194,7 +194,7 @@ class Environment:
         err, specification = self.__process_specification(specification)
         if err:
             raise InvalidArgument("Specification Invalid: " + err)
-        self.specification = structify(specification)
+        self.specification = specification
 
         err, configuration = process_schema(
             {"type": "object", "properties": self.specification.configuration},
@@ -202,7 +202,7 @@ class Environment:
         )
         if err:
             raise InvalidArgument("Configuration Invalid: " + err)
-        self.configuration = structify(configuration)
+        self.configuration = configuration
 
         if not callable(interpreter):
             raise InvalidArgument("Interpreter is not Callable.")
@@ -218,7 +218,7 @@ class Environment:
 
         if not all([callable(a) for a in agents.values()]):
             raise InvalidArgument("Default agents must be Callable.")
-        self.agents = structify(agents)
+        self.agents = agents
 
         if steps is not None and len(steps) > 0:
             self.__set_state(steps[-1])
@@ -263,7 +263,7 @@ class Environment:
                 new_action_state["status"] = "ERROR"
             else:
                 if not self.debug:
-                    new_action_state["action"] = default_schema(action_schema, action)
+                    new_action_state["action"] = default_schema_wo_structify(action_schema, action)
                 else:
                     err, data = process_schema(action_schema, action)
                     if err:
@@ -330,8 +330,12 @@ class Environment:
         if num_agents is None:
             num_agents = self.specification["agents"][0]
 
+        if num_agents not in self.specification.agents:
+            raise InvalidArgument(f"{num_agents} is not a valid number of agent(s).")
+
         # Get configuration default state.
-        self.__set_state([Struct({}) for _ in range(num_agents)])
+        self.state = [self.__get_state(i, Struct({})) for i in range(num_agents)]
+        self.steps = [self.state]
         # Reset all agents to status=INACTIVE (copy out values to reset afterwards).
         statuses = [a["status"] for a in self.state]
         for agent in self.state:
@@ -340,7 +344,7 @@ class Environment:
             # print(agent)
         # Give the interpreter an opportunity to make any initializations.
         logs = []
-        self.__set_state(self.__run_interpreter(self.state, logs))
+        self.__set_state(self.__run_interpreter_wo_structify(self.state, logs))
         self.logs.append(logs)
         # Replace the starting "status" if still "done".
         if self.done and len(self.state) == len(statuses):
@@ -495,7 +499,7 @@ class Environment:
     @property
     def done(self) -> bool:
         """bool: If any agents have an ACTIVE status."""
-        return all(s.status != "ACTIVE" for s in self.state)
+        return all(s["status"] != "ACTIVE" for s in self.state)
 
     def toJSON(self) -> dict[str, Any]:
         """
@@ -575,7 +579,7 @@ class Environment:
 
         __states = [self.__get_state(index, s) for index, s in enumerate(state)]
         try:
-            self.state = structify(__states)
+            self.state = __states
         except ValueError as e:
             raise e
         self.steps = [self.state]
@@ -598,7 +602,7 @@ class Environment:
                         update_props(prop["properties"])
                 return props
 
-            props = structify(update_props(copy.deepcopy(self.__state_schema.properties)))
+            props = update_props(copy.deepcopy(self.__state_schema.properties))
 
             setattr(self, key, {**self.__state_schema, "properties": props})
 
@@ -606,6 +610,27 @@ class Environment:
         if err:
             raise InvalidArgument(f"Default state generation failed for #{position}: " + err)
         return data
+
+    def __loop_through_interpreter_wo_structify(
+        self, state: list[dict[str, Any]], logs: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        state = [s for s in state]
+        args = [state, self, logs]
+        new_state = self.interpreter(*args[: self.interpreter.__code__.co_argcount])
+        new_state[0]["observation"]["step"] = 0 if self.done else len(self.steps)
+
+        shcema_enum = self.__state_schema["properties"]["status"]["enum"]
+        for index, agent in enumerate(new_state):
+            if index < len(logs) and "duration" in logs[index]:
+                duration = logs[index]["duration"]
+                overage_time_consumed = max(0, duration - self.configuration.actTimeout)
+                agent["observation"]["remainingOverageTime"] -= overage_time_consumed
+            if agent["status"] not in shcema_enum:
+                self.debug_print(f"Invalid Action: {agent.status}")
+                agent["status"] = "INVALID"
+            if agent["status"] in ["ERROR", "INVALID", "TIMEOUT"]:
+                agent["reward"] = None
+        return new_state
 
     def __loop_through_interpreter(
         self, state: list[dict[str, Any]], logs: list[dict[str, Any]]
@@ -627,6 +652,47 @@ class Environment:
             if agent["status"] in ["ERROR", "INVALID", "TIMEOUT"]:
                 agent["reward"] = None
         return new_state
+    
+    def __run_interpreter_prod_wo_structify(self, state: list[Any], logs: list[dict[str, Any]]) -> list[Any]:
+        out = None
+        err = None
+        try:
+            with (
+                StringIO() as out_buffer,
+                StringIO() as err_buffer,
+                redirect_stdout(out_buffer),
+                redirect_stderr(err_buffer),
+            ):
+                try:
+                    new_state = self.__loop_through_interpreter_wo_structify(state, logs)
+                    return new_state
+                except Exception as e:
+                    # Print the exception stack trace to our log
+                    traceback.print_exc(file=err_buffer)
+                    # Reraise e to ensure that the program exits
+                    raise e
+                finally:
+                    out = out_buffer.getvalue()
+                    err = err_buffer.getvalue()
+
+                    # strip if needed
+                    # Allow up to 10k (default) log characters per step which is ~10MB per 600 step episode
+                    max_log_length = self.configuration.get("maxLogLength", 10000)
+                    if max_log_length is not None:
+                        out = out[0:max_log_length]
+                        err = err[0:max_log_length]
+
+                    if out or err:
+                        logs.append({"stdout": out, "stderr": err})
+        finally:
+            if out:
+                while out.endswith("\n"):
+                    out = out[:-1]
+                self.debug_print(out)
+            if err:
+                while err.endswith("\n"):
+                    err = err[:-1]
+                self.debug_print(err)
 
     def __run_interpreter_prod(self, state: list[Any], logs: list[dict[str, Any]]) -> list[Any]:
         out = None
@@ -668,6 +734,13 @@ class Environment:
                 while err.endswith("\n"):
                     err = err[:-1]
                 self.debug_print(err)
+
+    def __run_interpreter_wo_structify(self, state: list[Any], logs: list[dict[str, Any]]) -> list[Any]:
+        # Append any environmental logs to any agent logs we collected.
+        if self.debug:
+            return self.__loop_through_interpreter_wo_structify(state, logs)
+        else:
+            return self.__run_interpreter_prod_wo_structify(state, logs)
 
     def __run_interpreter(self, state: list[Any], logs: list[dict[str, Any]]) -> list[Any]:
         # Append any environmental logs to any agent logs we collected.

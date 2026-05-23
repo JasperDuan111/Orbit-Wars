@@ -1,5 +1,6 @@
 from kaggle_environments import make
 from kaggle_environments.envs.orbit_wars.orbit_wars import Planet
+from kaggle_environments.utils import structify
 from ..action import ActionBuilder
 from ..config import ActionSpaceConfig, DEFAULT_CONFIG, EnvConfig, RewardConfig
 from ..obs import ship_totals
@@ -28,7 +29,7 @@ class OrbitWarsSelfPlayEnv:
         if env_config.seed is not None:
             configuration["seed"] = env_config.seed
         configuration["numPlayers"] = env_config.num_players
-        self._env = make("orbit_wars", configuration=configuration, debug=env_config.debug)
+        self._env = make("orbit_wars", configuration=structify(configuration), debug=env_config.debug)
         self.num_players = env_config.num_players
         self.player_index = 0
         self._action_builder = ActionBuilder(action_config)
