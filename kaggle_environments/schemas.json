@@ -77,7 +77,7 @@
   },
   "state": {
     "type": "object",
-    "additionalProperties": false,
+    "additionalProperties": true,
     "properties": {
       "action": {
         "description": "Value returned from the agent based on the observation.",

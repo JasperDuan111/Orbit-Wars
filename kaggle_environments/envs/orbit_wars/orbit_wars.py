@@ -238,6 +238,8 @@ def generate_planets(rng=None):
     max_attempts = 5000
     has_orbiting = False
 
+    is_static = [True for _ in range(len(planets))]
+
     while len(planets) < num_q1 * 4 or (not has_orbiting and attempts < max_attempts):
         attempts += 1
         if attempts >= max_attempts:
@@ -292,19 +294,152 @@ def generate_planets(rng=None):
                 break
 
         if valid:
+            planets.extend(temp_planets)
+
             if orbital_radius + r < ROTATION_RADIUS_LIMIT:
                 has_orbiting = True
-            planets.extend(temp_planets)
+                is_static.extend((False, False, False, False))
+            else:
+                is_static.extend((True, True, True, True))
+
             id_counter += 4
 
-    return planets
+    return planets, is_static
 
+@njit(cache=True, nogil=True)
+def _generate_comet_paths_inner(
+    e, a, phi,
+    angular_velocity, spawn_step, comet_speed,
+    # not_comet_static_planet_pos, not_comet_static_planet_r,
+    # not_comet_orbiting_planet_pos, not_comet_orbiting_planet_r,
+    not_comet_planet_pos, not_comet_planet_r, planet_is_static
+):
+    b = a * math.sqrt(1.0 - e**2)
+    c_val = a * e
+
+    # Dense sample around perihelion half of orbit
+    dense = np.empty((5000, 2), dtype=np.float64)
+    for i in range(5000):
+        t = 0.3 * math.pi + 1.4 * math.pi * i / 4999.0
+        # Ellipse with focus at origin
+        ex = c_val + a * math.cos(t)
+        ey = b * math.sin(t)
+        # Rotate and translate to board
+        dense[i, 0] = CENTER + ex * math.cos(phi) - ey * math.sin(phi)
+        dense[i, 1] = CENTER + ex * math.sin(phi) + ey * math.cos(phi)
+
+    # 按弧长重采样
+    path = np.empty((5000, 2), dtype=np.float64)
+    path[0, 0] = dense[0, 0]
+    path[0, 1] = dense[0, 1]
+    path_len = 1
+    cum = 0.0
+    target = comet_speed
+
+    for i in range(1, 5000):
+        dx = dense[i, 0] - dense[i - 1, 0]
+        dy = dense[i, 1] - dense[i - 1, 1]
+        dist = math.sqrt(dx*dx + dy*dy)
+        cum += dist
+        if cum >= target:
+            path[path_len, 0] = dense[i, 0]
+            path[path_len, 1] = dense[i, 1]
+            path_len += 1
+            target += comet_speed
+
+    # Extract contiguous on-board segment
+    board_start = -1
+    board_end = -1
+    for i in range(path_len):
+        x, y = path[i, 0], path[i, 1]
+        if 0 <= x <= BOARD_SIZE and 0 <= y <= BOARD_SIZE:
+            if board_start == -1:
+                board_start = i
+            board_end = i
+
+    if board_start == -1:
+        return np.zeros((0, 0, 0), dtype=np.float64)  # 表示无效
+
+    visible_len = board_end - board_start + 1
+    if visible_len < 5 or visible_len > 40:
+        return np.zeros((0, 0, 0), dtype=np.float64)  # 表示无效
+
+    # 4. 对称位置与碰撞校验
+    buf = COMET_RADIUS + 0.5
+    for k in range(visible_len):
+        cx = path[board_start + k, 0]
+        cy = path[board_start + k, 1]
+
+        # Sun
+        if distance_square(cx, cy, CENTER, CENTER) < (SUN_RADIUS + COMET_RADIUS)**2:
+            return np.zeros((0, 0, 0), dtype=np.float64)
+
+        sym_x = np.array([cy, BOARD_SIZE - cx, cx, BOARD_SIZE - cy])
+        sym_y = np.array([cx, cy, BOARD_SIZE - cy, BOARD_SIZE - cx])
+
+        # # Check whether against static planets
+        # for i in range(len(not_comet_static_planet_r)):
+        #     for s in range(4):
+        #         if distance_square(
+        #             sym_x[s], sym_y[s], 
+        #             not_comet_static_planet_pos[i, 0], not_comet_static_planet_pos[i, 1]
+        #         ) < (not_comet_static_planet_r[i] + buf)**2:
+        #             return np.zeros((0, 0, 0), dtype=np.float64)
+                
+        # # Check against orbiting planets at their actual positions
+        # # Use tighter buffer — sweep mechanics handle runtime near-misses
+        # game_step = spawn_step - 1 + k
+        # for i in range(len(not_comet_orbiting_planet_r)):
+        #     dx = not_comet_orbiting_planet_pos[i, 0] - CENTER
+        #     dy = not_comet_orbiting_planet_pos[i, 1] - CENTER
+        #     orb_r = math.sqrt(dx*dx + dy*dy)
+        #     init_angle = math.atan2(dy, dx)
+        #     cur_angle = init_angle + angular_velocity * game_step
+        #     px = CENTER + orb_r * math.cos(cur_angle)
+        #     py = CENTER + orb_r * math.sin(cur_angle)
+        #     for s in range(4):
+        #         if distance_square(sym_x[s], sym_y[s], px, py) < (not_comet_orbiting_planet_r[i] + COMET_RADIUS)**2:
+        #             return np.zeros((0, 0, 0), dtype=np.float64)
+
+        game_step = spawn_step - 1 + k 
+        for i in range(len(not_comet_planet_r)):
+            if planet_is_static[i]:
+                for s in range(4):
+                    if distance_square(
+                        sym_x[s], sym_y[s], 
+                        not_comet_planet_pos[i, 0], not_comet_planet_pos[i, 1]
+                    ) < (not_comet_planet_r[i] + buf)**2:
+                        return np.zeros((0, 0, 0), dtype=np.float64)
+            else:
+                dx = not_comet_planet_pos[i, 0] - CENTER
+                dy = not_comet_planet_pos[i, 1] - CENTER
+                orb_r = math.sqrt(dx*dx + dy*dy)
+                init_angle = math.atan2(dy, dx)
+                cur_angle = init_angle + angular_velocity * game_step
+                px = CENTER + orb_r * math.cos(cur_angle)
+                py = CENTER + orb_r * math.sin(cur_angle)
+                for s in range(4):
+                    if distance_square(sym_x[s], sym_y[s], px, py) < (not_comet_planet_r[i] + COMET_RADIUS)**2:
+                        return np.zeros((0, 0, 0), dtype=np.float64)
+                
+    out_paths = np.empty((4, visible_len, 2), dtype=np.float64)
+    for i in range(visible_len):
+        vx = path[board_start + i, 0]
+        vy = path[board_start + i, 1]
+        
+        out_paths[0, i, 0], out_paths[0, i, 1] = vy, vx
+        out_paths[1, i, 0], out_paths[1, i, 1] = BOARD_SIZE - vx, vy
+        out_paths[2, i, 0], out_paths[2, i, 1] = vx, BOARD_SIZE - vy
+        out_paths[3, i, 0], out_paths[3, i, 1] = BOARD_SIZE - vy, BOARD_SIZE - vx
+        
+    return out_paths
 
 def generate_comet_paths(
-    initial_planets,
-    angular_velocity,
-    spawn_step,
-    comet_planet_ids=None,
+    initial_planets,    #
+    planet_is_static,   #
+    angular_velocity,   # scalar
+    spawn_step, # scalar
+    comet_planet_ids=None,  #
     comet_speed=4.0,
     rng=None,
 ):
@@ -319,6 +454,26 @@ def generate_comet_paths(
         comet_planet_ids = set()
     else:
         comet_planet_ids = set(comet_planet_ids)
+
+    # planet_is_not_comet = np.array([not(planet[0] in comet_planet_ids) for planet in initial_planets])
+    # planet_pos = np.array([(p[2], p[3]) for p in initial_planets], np.float64)
+    # planet_r = np.array([p[4] for p in initial_planets], np.float64)
+    # planet_is_static = np.array(planet_is_static, np.bool_)
+
+    # planet_is_not_comet_static = planet_is_not_comet & planet_is_static
+    # planet_is_not_comet_orbiting = planet_is_not_comet & ~planet_is_static
+
+    # not_comet_static_planet_pos = planet_pos[planet_is_not_comet_static, :]
+    # not_comet_orbiting_planet_pos = planet_pos[planet_is_not_comet_orbiting, :]
+
+    # not_comet_static_planet_r = planet_r[planet_is_not_comet_static]
+    # not_comet_orbiting_planet_r = planet_r[planet_is_not_comet_orbiting]
+
+    planet_is_not_comet = np.array([not(planet[0] in comet_planet_ids) for planet in initial_planets])
+    not_comet_planet_pos = np.array([(p[2], p[3]) for p in initial_planets], np.float64)[planet_is_not_comet, :]
+    not_comet_planet_r = np.array([p[4] for p in initial_planets], np.float64)[planet_is_not_comet]
+    planet_is_static = np.array(planet_is_static, np.bool_)
+
     for _ in range(300):
         # Highly eccentric ellipse with sun at one focus
         e = rng.uniform(0.75, 0.93)
@@ -327,120 +482,136 @@ def generate_comet_paths(
         if perihelion < SUN_RADIUS + COMET_RADIUS:
             continue
 
-        b = a * math.sqrt(1 - e**2)
-        c_val = a * e
         # Orientation: perihelion direction from sun (keep in Q4 quadrant)
         phi = rng.uniform(math.pi / 6, math.pi / 3)
 
-        # Dense sample around perihelion half of orbit
-        dense = []
-        num = 5000
-        for i in range(num):
-            t = 0.3 * math.pi + 1.4 * math.pi * i / (num - 1)
-            # Ellipse with focus at origin
-            ex = c_val + a * math.cos(t)
-            ey = b * math.sin(t)
-            # Rotate and translate to board
-            x = CENTER + ex * math.cos(phi) - ey * math.sin(phi)
-            y = CENTER + ex * math.sin(phi) + ey * math.cos(phi)
-            dense.append((x, y))
+        # out_paths = _generate_comet_paths_inner(
+        #     e, a, phi,
+        #     angular_velocity, spawn_step, comet_speed,
+        #     not_comet_static_planet_pos, not_comet_static_planet_r,
+        #     not_comet_orbiting_planet_pos, not_comet_orbiting_planet_r,
+        # )
 
-        # Re-sample at constant comet_speed arc-length intervals
-        path = [dense[0]]
-        cum = 0.0
-        target = comet_speed
-        for i in range(1, len(dense)):
-            cum += distance(dense[i], dense[i - 1])
-            if cum >= target:
-                path.append(dense[i])
-                target += comet_speed
+        out_paths = _generate_comet_paths_inner(
+            e, a, phi,
+            angular_velocity, spawn_step, comet_speed,
+            not_comet_planet_pos, not_comet_planet_r, planet_is_static
+        )
 
-        # Extract contiguous on-board segment
-        board_start = None
-        board_end = None
-        for i, (x, y) in enumerate(path):
-            if 0 <= x <= BOARD_SIZE and 0 <= y <= BOARD_SIZE:
-                if board_start is None:
-                    board_start = i
-                board_end = i
-
-        if board_start is None:
-            continue
-        visible = path[board_start : board_end + 1]
-        if not (5 <= len(visible) <= 40):
-            continue
-
-        # Build 4 rotationally symmetric paths (4-fold rotation about center).
-        # Q1 and Q3 copies are reflected across the y=x diagonal so all 4
-        # copies are 90° rotations of each other — every player sees the
-        # same game state rotated by their quadrant.
-        paths = [
-            [[y, x] for x, y in visible],
-            [[BOARD_SIZE - x, y] for x, y in visible],
-            [[x, BOARD_SIZE - y] for x, y in visible],
-            [[BOARD_SIZE - y, BOARD_SIZE - x] for x, y in visible],
-        ]
-
-        # Separate planets into static and orbiting (exclude other comets)
-        static_planets = []
-        orbiting_planets = []
-        for planet in initial_planets:
-            if planet[0] in comet_planet_ids:
-                continue
-            pr = distance((planet[2], planet[3]), (CENTER, CENTER))
-            if pr + planet[4] < ROTATION_RADIUS_LIMIT:
-                orbiting_planets.append(planet)
-            else:
-                static_planets.append(planet)
-
-        valid = True
-        buf = COMET_RADIUS + 0.5
-        for k, (cx, cy) in enumerate(visible):
-            # Check sun
-            if distance((cx, cy), (CENTER, CENTER)) < SUN_RADIUS + COMET_RADIUS:
-                valid = False
-                break
-
-            # Check all 4 symmetric positions against static planets
-            sym_pts = [
-                (cy, cx),
-                (BOARD_SIZE - cx, cy),
-                (cx, BOARD_SIZE - cy),
-                (BOARD_SIZE - cy, BOARD_SIZE - cx),
-            ]
-            for planet in static_planets:
-                for sp in sym_pts:
-                    if distance(sp, (planet[2], planet[3])) < planet[4] + buf:
-                        valid = False
-                        break
-                if not valid:
-                    break
-            if not valid:
-                break
-
-            # Check against orbiting planets at their actual positions
-            # Use tighter buffer — sweep mechanics handle runtime near-misses
-            game_step = spawn_step - 1 + k
-            for planet in orbiting_planets:
-                dx = planet[2] - CENTER
-                dy = planet[3] - CENTER
-                orb_r = math.sqrt(dx**2 + dy**2)
-                init_angle = math.atan2(dy, dx)
-                cur_angle = init_angle + angular_velocity * game_step
-                px = CENTER + orb_r * math.cos(cur_angle)
-                py = CENTER + orb_r * math.sin(cur_angle)
-                for sp in sym_pts:
-                    if distance(sp, (px, py)) < planet[4] + COMET_RADIUS:
-                        valid = False
-                        break
-                if not valid:
-                    break
-            if not valid:
-                break
-
-        if valid:
-            return paths
+        if out_paths.shape[0] > 0:
+            return out_paths.tolist()
+    
     return None
+
+    #     # Dense sample around perihelion half of orbit
+    #     dense = []
+    #     num = 5000
+    #     for i in range(num):
+    #         t = 0.3 * math.pi + 1.4 * math.pi * i / (num - 1)
+    #         # Ellipse with focus at origin
+    #         ex = c_val + a * math.cos(t)
+    #         ey = b * math.sin(t)
+    #         # Rotate and translate to board
+    #         x = CENTER + ex * math.cos(phi) - ey * math.sin(phi)
+    #         y = CENTER + ex * math.sin(phi) + ey * math.cos(phi)
+    #         dense.append((x, y))
+
+    #     # Re-sample at constant comet_speed arc-length intervals
+    #     path = [dense[0]]
+    #     cum = 0.0
+    #     target = comet_speed
+    #     for i in range(1, len(dense)):
+    #         cum += distance(dense[i], dense[i - 1])
+    #         if cum >= target:
+    #             path.append(dense[i])
+    #             target += comet_speed
+
+    #     # Extract contiguous on-board segment
+    #     board_start = None
+    #     board_end = None
+    #     for i, (x, y) in enumerate(path):
+    #         if 0 <= x <= BOARD_SIZE and 0 <= y <= BOARD_SIZE:
+    #             if board_start is None:
+    #                 board_start = i
+    #             board_end = i
+
+    #     if board_start is None:
+    #         continue
+    #     visible = path[board_start : board_end + 1]
+    #     if not (5 <= len(visible) <= 40):
+    #         continue
+
+    #     # Build 4 rotationally symmetric paths (4-fold rotation about center).
+    #     # Q1 and Q3 copies are reflected across the y=x diagonal so all 4
+    #     # copies are 90° rotations of each other — every player sees the
+    #     # same game state rotated by their quadrant.
+    #     paths = [
+    #         [[y, x] for x, y in visible],
+    #         [[BOARD_SIZE - x, y] for x, y in visible],
+    #         [[x, BOARD_SIZE - y] for x, y in visible],
+    #         [[BOARD_SIZE - y, BOARD_SIZE - x] for x, y in visible],
+    #     ]
+
+    #     # Separate planets into static and orbiting (exclude other comets)
+    #     static_planets = []
+    #     orbiting_planets = []
+    #     for planet in initial_planets:
+    #         if planet[0] in comet_planet_ids:
+    #             continue
+    #         pr = distance((planet[2], planet[3]), (CENTER, CENTER))
+    #         if pr + planet[4] < ROTATION_RADIUS_LIMIT:
+    #             orbiting_planets.append(planet)
+    #         else:
+    #             static_planets.append(planet)
+
+    #     valid = True
+    #     buf = COMET_RADIUS + 0.5
+    #     for k, (cx, cy) in enumerate(visible):
+    #         # Check sun
+    #         if distance((cx, cy), (CENTER, CENTER)) < SUN_RADIUS + COMET_RADIUS:
+    #             valid = False
+    #             break
+
+    #         # Check all 4 symmetric positions against static planets
+    #         sym_pts = [
+    #             (cy, cx),
+    #             (BOARD_SIZE - cx, cy),
+    #             (cx, BOARD_SIZE - cy),
+    #             (BOARD_SIZE - cy, BOARD_SIZE - cx),
+    #         ]
+    #         for planet in static_planets:
+    #             for sp in sym_pts:
+    #                 if distance(sp, (planet[2], planet[3])) < planet[4] + buf:
+    #                     valid = False
+    #                     break
+    #             if not valid:
+    #                 break
+    #         if not valid:
+    #             break
+
+    #         # Check against orbiting planets at their actual positions
+    #         # Use tighter buffer — sweep mechanics handle runtime near-misses
+    #         game_step = spawn_step - 1 + k
+    #         for planet in orbiting_planets:
+    #             dx = planet[2] - CENTER
+    #             dy = planet[3] - CENTER
+    #             orb_r = math.sqrt(dx**2 + dy**2)
+    #             init_angle = math.atan2(dy, dx)
+    #             cur_angle = init_angle + angular_velocity * game_step
+    #             px = CENTER + orb_r * math.cos(cur_angle)
+    #             py = CENTER + orb_r * math.sin(cur_angle)
+    #             for sp in sym_pts:
+    #                 if distance(sp, (px, py)) < planet[4] + COMET_RADIUS:
+    #                     valid = False
+    #                     break
+    #             if not valid:
+    #                 break
+    #         if not valid:
+    #             break
+
+    #     if valid:
+    #         return paths
+    # return None
 
 
 def interpreter(state, env):
@@ -477,7 +648,7 @@ def interpreter(state, env):
 
         angular_velocity = init_rng.uniform(0.025, 0.05)
         obs0["angular_velocity"] = angular_velocity
-        obs0["planets"] = generate_planets(init_rng)
+        obs0["planets"], state[0]["planet_is_static"] = generate_planets(init_rng)
         obs0["initial_planets"] = [p.copy() for p in obs0["planets"]]
         obs0["fleets"] = []
         obs0["next_fleet_id"] = 0
@@ -552,6 +723,7 @@ def interpreter(state, env):
         comet_rng = random.Random(f"orbit_wars-comet-{episode_seed}-{step + 1}")
         comet_paths = generate_comet_paths(
             obs0["initial_planets"],
+            state[0]["planet_is_static"],
             obs0["angular_velocity"],
             step + 1,
             obs0["comet_planet_ids"],
