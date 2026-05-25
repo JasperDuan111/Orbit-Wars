@@ -12,7 +12,7 @@ Key points:
 
 Conda virtual environment: 
 ```bash
-conda create -n OrbitWars python=3.11
+conda create -n OrbitWars python=3.11 -y
 conda activate OrbitWars
 ```
 
