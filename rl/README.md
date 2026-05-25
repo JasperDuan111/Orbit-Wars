@@ -19,11 +19,9 @@ conda activate OrbitWars
 Install dependencies:
 
 ```bash
-uv pip install torch torchvision --index-url https://download.pytorch.org/whl/cu111
+pip install torch torchvision --index-url https://download.pytorch.org/whl/cu111
 # 将 .../whl/cu111 的111换成对应的驱动版本，例如.../whl/cu130
-```
-```bash
-pip install numpy tensorboard numba yaml "requests >= 2.25.1" "jsonschema>=3.0.1"
+pip install numpy tensorboard numba pyyaml "requests >= 2.25.1" "jsonschema>=3.0.1"
 ```
 ```
 
