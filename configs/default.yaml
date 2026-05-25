@@ -21,8 +21,14 @@ action:
   max_launches_per_source: 6
 
 model:
-  hidden_sizes: [512, 512, 256]
+  model_type: "gnn"       # "mlp" (baseline) or "gnn" (GNN+Attention)
+  hidden_sizes: [512, 512, 256]  # only used by mlp model
   dropout: 0.1
+  gnn:                    # GNN+Attention model hyperparameters
+    hg: 128               # GCN hidden dim (planet graph convolution)
+    hf: 128               # Fleet self-attention hidden dim
+    ha: 64                # Cross-attention head dim
+    num_gcn_layers: 2     # Number of graph convolution layers
 
 reward:
   reward_scale: 0.01

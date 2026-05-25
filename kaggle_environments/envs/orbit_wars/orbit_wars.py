@@ -6,7 +6,7 @@ from collections import namedtuple
 from os import path
 import random
 
-from kaggle_environments.utils import Struct
+from kaggle_environments.utils import Struct, structify
 
 # Named tuples for agent convenience.
 # Planets and fleets share a common [id, owner, x, y, ...] prefix.
@@ -1050,7 +1050,7 @@ def renderer(state, env):
 dir_path = path.dirname(__file__)
 json_path = path.abspath(path.join(dir_path, "orbit_wars.json"))
 with open(json_path) as json_file:
-    specification = json.load(json_file)
+    specification = structify(json.load(json_file))
 
 
 def html_renderer(env, mode):
@@ -1120,4 +1120,4 @@ def starter_agent(obs):
     return moves
 
 
-agents = {"random": random_agent, "starter": starter_agent}
+agents = structify({"random": random_agent, "starter": starter_agent})
