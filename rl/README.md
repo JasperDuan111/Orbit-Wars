@@ -22,7 +22,7 @@ Install dependencies:
 pip install --index-url https://download.pytorch.org/whl/cu121 torch torchvision --upgrade
 # 将 .../whl/cu121换成对应的驱动版本，例如.../whl/cu130
 pip install numpy tensorboard numba pyyaml "requests >= 2.25.1" "jsonschema>=3.0.1"
-```
+pip install -U setuptools
 ```
 
 Train:
