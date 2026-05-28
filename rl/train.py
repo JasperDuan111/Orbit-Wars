@@ -394,19 +394,20 @@ def main():
             writer.add_scalar("train/learning_rate", optimizer.param_groups[0]["lr"], update)
 
             train_ratio = f"{train_time/update_time*100:.2f}"
+            if update % 10 == 0 or update == start_update:
             # Log per-step timing
-            log_msg = (
-                f"==============================    Update {update}    ==================================\n"
-                f"rollout{_format_time(rollout_time):>10s} | "
-                f"train{_format_time(train_time):>10s} | "
-                f"total{_format_time(update_time):>11s} | "
-                f"train/total{train_ratio:>7s}% \n"
-                f"reward{_format_result(mean_reward):>11s} | "
-                f"p_loss{_format_result(stats['policy_loss']):>9s} | "
-                f"v_loss{_format_result(stats['value_loss']):>10s} | "
-                f"ent{_format_result(stats['entropy']):>16s} \n"
-            )
-            print(log_msg)
+                log_msg = (
+                    f"==============================    Update {update}    ==================================\n"
+                    f"rollout{_format_time(rollout_time):>10s} | "
+                    f"train{_format_time(train_time):>10s} | "
+                    f"total{_format_time(update_time):>11s} | "
+                    f"train/total{train_ratio:>7s}% \n"
+                    f"reward{_format_result(mean_reward):>11s} | "
+                    f"p_loss{_format_result(stats['policy_loss']):>9s} | "
+                    f"v_loss{_format_result(stats['value_loss']):>10s} | "
+                    f"ent{_format_result(stats['entropy']):>16s} \n"
+                )
+                print(log_msg)
 
             # Save & opponent refresh
             if update % config.train.save_every == 0:

@@ -19,15 +19,15 @@ conda activate OrbitWars
 Install dependencies:
 
 ```bash
-pip install torch torchvision --index-url https://download.pytorch.org/whl/cu111
-# 将 .../whl/cu111 的111换成对应的驱动版本，例如.../whl/cu130
+pip install --index-url https://download.pytorch.org/whl/cu121 torch torchvision --upgrade
+# 将 .../whl/cu121换成对应的驱动版本，例如.../whl/cu130
 pip install numpy tensorboard numba pyyaml "requests >= 2.25.1" "jsonschema>=3.0.1"
 ```
 ```
 
 Train:
 ```bash
-python -m rl.train --config configs/default.yaml --resume checkpoints/ppo_orbit_wars_150.pt
+python -m rl.train --config configs/default.yaml --device cuda --resume checkpoints/ppo_orbit_wars_150.pt
 ```
 
 TensorBoard:

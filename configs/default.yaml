@@ -15,10 +15,10 @@ obs:
   global_features: 6
 
 action:
-  max_sources: 8
+  max_sources: 20
   max_targets: 20
   ship_fractions: [0.25, 0.5, 0.75, 1.0]
-  max_launches_per_source: 6
+  max_launches_per_source: 1
 
 model:
   model_type: "gnn"       # "mlp" (baseline) or "gnn" (GNN+Attention)
@@ -44,7 +44,7 @@ env:
   num_players: 2
   episode_steps: 500
   act_timeout: 1
-  seed: null
+  seed: 42
   debug: false
 
 train:
