@@ -6,7 +6,8 @@ from typing import Optional
 import numpy as np
 import torch
 from kaggle_environments.envs.orbit_wars.orbit_wars import Planet
-from .action import ActionBuilder, sample_action_sequence
+from .action import (ActionBuilder, sample_action_sequence,
+                        select_sources, source_selection_logprob)
 from .config import ActionSpaceConfig, DEFAULT_CONFIG, GameConfig, ObsConfig
 from .obs import encode_observation
 from .models import ActorCritic
@@ -64,15 +65,27 @@ class PolicyOpponent:
         self._action_builder = ActionBuilder(self.action_config)
 
     def act(self, obs):
-        actions, source_ships = self._action_builder.build(obs)
         obs_vector = encode_observation(
             obs, obs_config=self.obs_config, game_config=self.game_config
         )
         obs_tensor = torch.from_numpy(obs_vector).float().unsqueeze(0).to(self.device)
         with torch.no_grad():
-            logits, _ = self.policy(obs_tensor)
+            source_logits, slot_logits, _, ownership_mask = self.policy(obs_tensor)
+            source_logits = source_logits.squeeze(0)
+            slot_logits = slot_logits.squeeze(0)
+            ownership_mask = ownership_mask.squeeze(0)
+        # Select sources deterministically
+        src_indices = select_sources(
+            source_logits, ownership_mask,
+            self.action_config.max_sources, deterministic=True,
+        )
+        # Build templates with selected sources
+        actions, source_ships = self._action_builder.build(
+            obs, source_planet_ids=src_indices,
+        )
+        with torch.no_grad():
             action_indices, _, _ = sample_action_sequence(
-                logits.squeeze(0),
+                slot_logits,
                 actions,
                 source_ships,
                 max_launches=self.action_config.max_launches_per_source,
@@ -110,37 +123,44 @@ class PolicyOpponent:
             policy = first.policy
 
             obs_vectors = []
-            templates_list = []
-            ships_list = []
+            raw_obs_list = []
             for idx in indices:
                 _, obs = opponents_with_obs[idx]
-                actions, source_ships = first._action_builder.build(obs)
+                raw_obs_list.append(obs)
                 obs_vec = encode_observation(
                     obs, obs_config=obs_config, game_config=game_config,
                     episode_steps=episode_steps,
                 )
                 obs_vectors.append(obs_vec)
-                templates_list.append(actions)
-                ships_list.append(source_ships)
 
             obs_tensor = torch.from_numpy(np.stack(obs_vectors)).float().to(device)
             with torch.no_grad():
-                logits_batch, _ = policy(obs_tensor)
+                source_logits_batch, slot_logits_batch, _, ownership_masks = policy(obs_tensor)
 
             for i, idx in enumerate(indices):
                 _, obs = opponents_with_obs[idx]
+                # Select sources deterministically
+                src_indices = select_sources(
+                    source_logits_batch[i], ownership_masks[i],
+                    action_config.max_sources, deterministic=True,
+                )
+                # Build templates with selected sources
+                templates, ships = first._action_builder.build(
+                    obs, source_planet_ids=src_indices,
+                )
+                # Sample slot actions
                 action_indices, _, _ = sample_action_sequence(
-                    logits_batch[i],
-                    templates_list[i],
-                    ships_list[i],
+                    slot_logits_batch[i],
+                    templates,
+                    ships,
                     max_launches=max_launches,
                     deterministic=True,
                     action_config=action_config,
                 )
                 results[idx] = first._action_builder.decode(
                     action_indices,
-                    templates_list[i],
-                    ships_list[i],
+                    templates,
+                    ships,
                     max_launches=max_launches,
                 )
 

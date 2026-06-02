@@ -25,11 +25,34 @@ class ActionBuilder:
         self.actions_per_source = self.config.actions_per_source
         self.max_sources = self.config.max_sources
 
-    def build(self, obs):
+    def build(self, obs, source_planet_ids: Optional[Sequence[int]] = None):
+        """Build action templates for source planets.
+
+        If source_planet_ids is None, falls back to ship-count ordering
+        (used by MLP model or when model doesn't output source logits).
+        """
         player_id = _get_field(obs, "player", 0)
         planets = _parse_planets(obs)
-        my_planets = [p for p in planets if p.owner == player_id]
-        my_planets.sort(key=lambda p: p.ships, reverse=True)
+
+        if source_planet_ids is not None and len(source_planet_ids) > 0:
+            # Use model-selected source planets
+            planet_by_id = {p.id: p for p in planets}
+            my_planets = []
+            for pid in source_planet_ids:
+                p = planet_by_id.get(int(pid))
+                if p is not None and p.owner == player_id:
+                    my_planets.append(p)
+            # Pad with ship-count sorted remaining owned planets
+            used_ids = {p.id for p in my_planets}
+            remaining = sorted(
+                [p for p in planets if p.owner == player_id and p.id not in used_ids],
+                key=lambda p: p.ships, reverse=True,
+            )
+            my_planets.extend(remaining)
+        else:
+            # Fallback: ship-count ordering
+            my_planets = [p for p in planets if p.owner == player_id]
+            my_planets.sort(key=lambda p: p.ships, reverse=True)
 
         actions: List[List[Optional[ActionTemplate]]] = []
         source_ships: List[int] = []
@@ -44,6 +67,7 @@ class ActionBuilder:
 
             src = my_planets[i]
             source_ships.append(int(src.ships))
+
             def _target_priority(tgt):
                 is_own = 1 if tgt.owner == player_id else 0
                 dist = math.hypot(src.x - tgt.x, src.y - tgt.y)
@@ -123,6 +147,81 @@ class ActionTemplate:
     fraction: float
 
 
+# ── Source selection (Gumbel top-k for training, argmax for inference) ──
+
+def select_sources(source_logits: torch.Tensor, ownership_mask: torch.Tensor,
+                   k: int, deterministic: bool = False) -> Optional[torch.Tensor]:
+    """Select k source planets from per-planet source scores.
+
+    Args:
+        source_logits: (S, N) per-slot logits over N planets, or (S, 1) for MLP fallback.
+        ownership_mask: (N,) boolean mask, True = owned planets.
+        k: number of sources to select.
+        deterministic: if True, use argmax; otherwise Gumbel top-k.
+
+    Returns:
+        source_indices: (k,) long tensor of selected planet indices,
+        or None if source_logits is not per-planet (MLP fallback).
+    """
+    # MLP fallback: source_logits has shape (S, 1) — no per-planet information
+    if source_logits.shape[-1] <= 1:
+        return None
+
+    device = source_logits.device
+    N = source_logits.shape[-1]
+    k = min(k, N)
+
+    # Average over slot dimension to get a single per-planet score
+    planet_scores = source_logits.mean(dim=0)  # (N,)
+
+    if deterministic:
+        masked = planet_scores.masked_fill(~ownership_mask, float('-inf'))
+        _, indices = torch.topk(masked, k=k, dim=-1)
+    else:
+        gumbel = -torch.log(-torch.log(torch.rand(N, device=device) + 1e-10) + 1e-10)
+        gumbel_scores = planet_scores + gumbel
+        gumbel_scores = gumbel_scores.masked_fill(~ownership_mask, float('-inf'))
+        _, indices = torch.topk(gumbel_scores, k=k, dim=-1)
+
+    return indices  # (k,)
+
+
+def source_selection_logprob(source_logits: torch.Tensor, ownership_mask: torch.Tensor,
+                             source_indices: Optional[torch.Tensor]) -> torch.Tensor:
+    """Plackett-Luce log-probability of selecting source planets in order.
+
+    Args:
+        source_logits: (S, N) or (S, 1) for MLP fallback.
+        ownership_mask: (N,) boolean mask.
+        source_indices: (k,) long tensor of selected planet indices, or None.
+
+    Returns:
+        Scalar log-probability (sum over selected items).
+    """
+    if source_indices is None or source_logits.shape[-1] <= 1:
+        return torch.zeros((), device=source_logits.device)
+
+    device = source_logits.device
+    planet_scores = source_logits.mean(dim=0)  # (N,)
+    k = source_indices.shape[0]
+
+    logprob = torch.zeros((), device=device)
+    remaining_mask = ownership_mask.clone()
+
+    for i in range(k):
+        idx = source_indices[i].item()
+        if not remaining_mask[idx]:
+            continue  # shouldn't happen, but guard against invalid indices
+        masked_logits = planet_scores.masked_fill(~remaining_mask, float('-inf'))
+        log_prob = masked_logits.log_softmax(dim=-1)
+        logprob = logprob + log_prob[idx]
+        remaining_mask[idx] = False
+
+    return logprob
+
+
+# ── Action sequence sampling / logprob (unmodified slot-level logic) ──
+
 def sample_action_sequence(
     logits: torch.Tensor,
     actions: Sequence[Sequence[Optional[ActionTemplate]]],
@@ -147,7 +246,7 @@ def sample_action_sequence(
             continue
         source_actions = actions[src_idx]
         fractions = [
-            (a.fraction if a is not None else -1.0) 
+            (a.fraction if a is not None else -1.0)
             for a in source_actions
         ]
         frac_tensor = torch.tensor(fractions, dtype=torch.float32, device=device)
@@ -205,7 +304,7 @@ def logprob_for_action_sequence(
             continue
         source_actions = actions[src_idx]
         fractions = [
-            (a.fraction if a is not None else -1.0) 
+            (a.fraction if a is not None else -1.0)
             for a in source_actions
         ]
         frac_tensor = torch.tensor(fractions, dtype=torch.float32, device=device)
@@ -245,7 +344,6 @@ def _ships_to_send(remaining_ships: int, fraction: float) -> int:
 
 
 def _mask_tensor(
-    # source_actions: Sequence[Optional[ActionTemplate]],
     source_actions: torch.Tensor,
     remaining_ships: int,
     device: torch.device,
@@ -254,25 +352,9 @@ def _mask_tensor(
         mask = torch.zeros(len(source_actions), dtype=torch.float32, device=device)
         mask[0] = 1.0
         return mask
-    
-    # mask = torch.zeros((len(source_actions),), dtype=torch.float32, device=device)
-    # mask[0] = 1.0
-    # if remaining_ships <= 0:
-    #     return mask
 
     mask = (remaining_ships * source_actions > 0.0).to(torch.float32)
     mask[0] = 1.0
-
-    return mask
-
-    for idx in range(1, len(source_actions)):
-        template = source_actions[idx]
-        if template is None:
-            continue
-        ships = _ships_to_send(remaining_ships, template.fraction)
-        if ships >= 1:
-            mask[idx] = 1.0
-    
     return mask
 
 

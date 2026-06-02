@@ -5,7 +5,7 @@ import torch
 from torch.amp import autocast, GradScaler
 from torch.nn.utils import clip_grad_norm_
 
-from .action import ActionBuilder, logprob_for_action_sequence
+from .action import logprob_for_action_sequence, select_sources, source_selection_logprob
 from .config import ActionSpaceConfig, DEFAULT_CONFIG
 
 
@@ -27,9 +27,14 @@ class RolloutBuffer:
         self.advantages = torch.zeros((rollout_steps, num_envs), device=device)
         self.returns = torch.zeros((rollout_steps, num_envs), device=device)
         self.raw_obs = [[None for _ in range(num_envs)] for _ in range(rollout_steps)]
+        self.action_templates = [[None for _ in range(num_envs)] for _ in range(rollout_steps)]
+        self.source_ships = [[None for _ in range(num_envs)] for _ in range(rollout_steps)]
+        self.source_indices = [[None for _ in range(num_envs)] for _ in range(rollout_steps)]
         self.pos = 0
 
-    def add_batch(self, obs, raw_obs, actions, logprobs, rewards, dones, values):
+    def add_batch(self, obs, raw_obs, actions, logprobs, rewards, dones, values,
+                  action_templates_list=None, source_ships_list=None,
+                  source_indices_list=None):
         if self.pos >= self.rollout_steps:
             raise RuntimeError("Rollout buffer is full.")
         self.obs[self.pos].copy_(obs)
@@ -40,6 +45,12 @@ class RolloutBuffer:
         self.values[self.pos].copy_(values)
         for i in range(self.num_envs):
             self.raw_obs[self.pos][i] = raw_obs[i]
+            if action_templates_list is not None:
+                self.action_templates[self.pos][i] = action_templates_list[i]
+            if source_ships_list is not None:
+                self.source_ships[self.pos][i] = source_ships_list[i]
+            if source_indices_list is not None:
+                self.source_indices[self.pos][i] = source_indices_list[i]
         self.pos += 1
 
     def compute_returns_and_advantages(self, last_values, gamma, gae_lambda):
@@ -61,6 +72,9 @@ class RolloutBuffer:
         flat_returns = self.returns.reshape(total)
         flat_advantages = self.advantages.reshape(total)
         flat_raw_obs = [self.raw_obs[t][e] for t in range(self.rollout_steps) for e in range(self.num_envs)]
+        flat_templates = [self.action_templates[t][e] for t in range(self.rollout_steps) for e in range(self.num_envs)]
+        flat_ships = [self.source_ships[t][e] for t in range(self.rollout_steps) for e in range(self.num_envs)]
+        flat_source_indices = [self.source_indices[t][e] for t in range(self.rollout_steps) for e in range(self.num_envs)]
 
         for start in range(0, total, batch_size):
             batch_idx = indices[start : start + batch_size]
@@ -72,6 +86,9 @@ class RolloutBuffer:
                 flat_returns[batch_idx],
                 flat_advantages[batch_idx],
                 [flat_raw_obs[i] for i in batch_idx],
+                [flat_templates[i] for i in batch_idx],
+                [flat_ships[i] for i in batch_idx],
+                [flat_source_indices[i] for i in batch_idx],
             )
 
     def clear(self):
@@ -94,7 +111,6 @@ class PPOTrainer:
         self.use_amp = use_amp
         self.scaler = GradScaler("cuda") if use_amp else None
         self.action_config = action_config or DEFAULT_CONFIG.action
-        self.action_builder = ActionBuilder(self.action_config)
         self.max_launches = self.action_config.max_launches_per_source
 
     def update(self, buffer):
@@ -105,14 +121,15 @@ class PPOTrainer:
         updates = 0
 
         for _ in range(self.epochs):
-            for batch_idx, obs, actions, old_logprobs, returns, adv, raw_obs in buffer.get(
+            for batch_idx, obs, actions, old_logprobs, returns, adv, raw_obs, \
+                templates_list, ships_list, source_indices_list in buffer.get(
                 self.batch_size
             ):
                 if self.use_amp:
                     with autocast("cuda"):
-                        logits, values = self.policy(obs)
+                        source_logits, slot_logits, values, ownership_mask = self.policy(obs)
                 else:
-                    logits, values = self.policy(obs)
+                    source_logits, slot_logits, values, ownership_mask = self.policy(obs)
                 values = values.squeeze(-1)
 
                 adv = advantages[batch_idx]
@@ -120,16 +137,18 @@ class PPOTrainer:
                 new_logprobs = []
                 entropies = []
                 for i in range(len(raw_obs)):
-                    action_templates, source_ships = self.action_builder.build(raw_obs[i])
-                    logprob, entropy = logprob_for_action_sequence(
-                        logits[i],
-                        action_templates,
-                        source_ships,
+                    src_lp = source_selection_logprob(
+                        source_logits[i], ownership_mask[i], source_indices_list[i]
+                    )
+                    slot_lp, entropy = logprob_for_action_sequence(
+                        slot_logits[i],
+                        templates_list[i],
+                        ships_list[i],
                         actions[i],
                         max_launches=self.max_launches,
                         action_config=self.action_config,
                     )
-                    new_logprobs.append(logprob)
+                    new_logprobs.append(src_lp + slot_lp)
                     entropies.append(entropy)
 
                 new_logprobs = torch.stack(new_logprobs)

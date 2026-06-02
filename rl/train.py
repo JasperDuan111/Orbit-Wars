@@ -12,7 +12,8 @@ from torch.utils.tensorboard import SummaryWriter
 
 from kaggle_environments.utils import Struct
 
-from .action import sample_action_sequence
+from .action import (ActionBuilder, sample_action_sequence,
+                        select_sources, source_selection_logprob)
 from .config import OrbitWarsConfig
 from .envs.orbit_wars_env import OrbitWarsSelfPlayEnv
 from .models import ActorCritic, ActorCriticGNN
@@ -268,7 +269,7 @@ def main():
                 obs_tensor = torch.from_numpy(obs_vec_batch).float().to(device)
 
                 with torch.no_grad():
-                    logits_batch, values_batch = policy(obs_tensor)
+                    source_logits, slot_logits, values_batch, ownership_masks = policy(obs_tensor)
                 values_batch = values_batch.squeeze(-1)
 
                 actions_batch = torch.zeros(
@@ -315,25 +316,47 @@ def main():
                 rewards = torch.zeros((config.train.num_envs,), device=device)
                 dones = torch.zeros((config.train.num_envs,), device=device)
                 obs_snapshots = []
+                templates_snapshots = []
+                ships_snapshots = []
+                source_indices_snapshots = []
+
+                action_builder = ActionBuilder(config.action)
 
                 for i, env in enumerate(envs):
-                    action_templates = env.last_actions
-                    source_ships = env.last_source_ships
-                    action_indices, logprob, _ = sample_action_sequence(
-                        logits_batch[i],
+                    # 1. Select source planets from learned scores
+                    src_indices = select_sources(
+                        source_logits[i], ownership_masks[i],
+                        config.action.max_sources, deterministic=False,
+                    )
+                    # 2. Build action templates with selected sources
+                    action_templates, source_ships = action_builder.build(
+                        obs_list[i], source_planet_ids=src_indices,
+                    )
+                    # 3. Sample slot actions from per-slot logits
+                    action_indices, slot_lp, _ = sample_action_sequence(
+                        slot_logits[i],
                         action_templates,
                         source_ships,
                         max_launches=config.action.max_launches_per_source,
                         deterministic=False,
                         action_config=config.action,
                     )
+                    # 4. Source-selection logprob
+                    src_lp = source_selection_logprob(
+                        source_logits[i], ownership_masks[i], src_indices,
+                    )
                     actions_batch[i] = action_indices
-                    logprobs_batch[i] = logprob
+                    logprobs_batch[i] = src_lp + slot_lp
 
                     obs_snapshots.append(dict(obs_list[i]))
+                    templates_snapshots.append(action_templates)
+                    ships_snapshots.append(source_ships)
+                    source_indices_snapshots.append(src_indices)
                     next_obs, reward, done, info = env.step(
                         action_indices,
                         opponent_actions=opponent_actions_per_env[i],
+                        action_templates_override=action_templates,
+                        source_ships_override=source_ships,
                     )
                     # rendering_html = env._env.render(mode = "html")
                     # with open(f"./tmp/render_result/new-update-{update}-roll-{roll}-env-{i}.html", "w") as f:
@@ -355,6 +378,9 @@ def main():
                     rewards,
                     dones,
                     values_batch,
+                    action_templates_list=templates_snapshots,
+                    source_ships_list=ships_snapshots,
+                    source_indices_list=source_indices_snapshots,
                 )
 
                 obs_list = next_obs_list
@@ -373,7 +399,7 @@ def main():
             )
             last_obs_tensor = torch.from_numpy(last_obs_vec).float().to(device)
             with torch.no_grad():
-                _, last_values = policy(last_obs_tensor)
+                _, _, last_values, _ = policy(last_obs_tensor)
             buffer.compute_returns_and_advantages(
                 last_values.squeeze(-1), config.train.gamma, config.train.gae_lambda
             )

@@ -36,15 +36,25 @@ class ActorCritic(nn.Module):
         self.actions_per_source = actions_per_source
         self.max_sources = max_sources
         self.body = _build_mlp(obs_dim, hidden_sizes, hidden_sizes[-1], dropout)
-        self.policy_head = nn.Linear(hidden_sizes[-1], max_sources * actions_per_source)
+        self.slot_policy_head = nn.Linear(hidden_sizes[-1], max_sources * actions_per_source)
         self.value_head = nn.Linear(hidden_sizes[-1], 1)
+        # Fallback: learnable, non-observation-dependent source logits (equivalent to fixed ordering)
+        self.fallback_source_logits = nn.Parameter(
+            torch.zeros(max_sources, 1)
+        )
 
     def forward(self, obs):
+        B = obs.shape[0]
         features = self.body(obs)
-        logits = self.policy_head(features)
-        logits = logits.view(-1, self.max_sources, self.actions_per_source)
+        slot_logits = self.slot_policy_head(features)
+        slot_logits = slot_logits.view(B, self.max_sources, self.actions_per_source)
         value = self.value_head(features)
-        return logits, value
+        # MLP lacks per-planet structure: source_logits are non-spatial (zeros);
+        # ActionBuilder falls back to ship-count ordering when no planet-dim source logits.
+        source_logits = self.fallback_source_logits.expand(B, self.max_sources, 1)
+        # ownership_mask: dummy True for all "planets" (MLP model doesn't use real planets)
+        ownership_mask = torch.ones(B, 1, dtype=torch.bool, device=obs.device)
+        return source_logits, slot_logits, value, ownership_mask
 
 
 # GNN + Self-Attention + Cross-Attention model
@@ -103,13 +113,20 @@ class ActorCriticGNN(nn.Module):
         # 4.3 Residual projection
         self.Wp = nn.Linear(self.ha, self.hg)
 
-        # 5. Output heads (after mean-pooling over N1 planet dimension)
-        self.policy_head = nn.Sequential(
+        # 5. Per-slot source selection via learned query vectors
+        self.source_query = nn.Parameter(torch.randn(max_sources, self.hg) * 0.02)
+        self.source_key = nn.Linear(self.hg, self.hg, bias=False)
+
+        # 6. Per-slot target+fraction head (shared across slots)
+        self.slot_policy_head = nn.Sequential(
             nn.Linear(self.hg, self.hg),
             nn.LayerNorm(self.hg),
             nn.GELU(),
-            nn.Linear(self.hg, max_sources * actions_per_source),
+            nn.Dropout(self.dropout),
+            nn.Linear(self.hg, actions_per_source),
         )
+
+        # 7. Value head (still mean-pooled)
         self.value_head = nn.Sequential(
             nn.Linear(self.hg, self.hg),
             nn.LayerNorm(self.hg),
@@ -134,6 +151,9 @@ class ActorCriticGNN(nn.Module):
         # Masks: distinguish real entities from zero-padding
         planet_mask = (Zp.abs().sum(dim=-1) > 1e-6).float()
         fleet_mask = (Zf.abs().sum(dim=-1) > 1e-6).float()
+
+        # Ownership mask (is_me is feature index 1)
+        ownership_mask = Zp[:, :, 1] > 0.5  # (B, max_planets)
 
         # -- 2. Planet GNN --
         Zp_t = self.Wa(Zp)
@@ -171,15 +191,31 @@ class ActorCriticGNN(nn.Module):
         Za = torch.bmm(attn_c, V)
 
         # 4.3 Residual connection
-        Z = self.Wp(Za) + Zp
+        Z = self.Wp(Za) + Zp  # (B, max_planets, hg)
 
-        # -- 5. Output heads (mean-pool over planets, then feed to MLP) --
+        # -- 5. Per-slot source selection via attention --
+        # slot_query: (1, max_sources, hg) → expand to (B, max_sources, hg)
+        Q_src = self.source_query.unsqueeze(0).expand(B, -1, -1)  # (B, max_sources, hg)
+        K_src = self.source_key(Z)  # (B, max_planets, hg)
+        source_logits = torch.bmm(Q_src, K_src.transpose(1, 2)) / (self.hg ** 0.5)
+        # source_logits: (B, max_sources, max_planets)
+
+        # -- 6. Per-slot target+fraction logits --
+        # Soft-attend over planets per slot to get slot embedding
+        # Mask to owned planets for source attention
+        src_mask = ownership_mask.unsqueeze(1).float()  # (B, 1, max_planets)
+        src_attn = torch.softmax(
+            source_logits.masked_fill(src_mask == 0, float('-inf')), dim=-1
+        ).nan_to_num(0)  # (B, max_sources, max_planets)
+        slot_embs = torch.bmm(src_attn, Z)  # (B, max_sources, hg)
+
+        # Shared MLP over each slot embedding → (B, max_sources, actions_per_source)
+        slot_logits = self.slot_policy_head(slot_embs)
+
+        # -- 7. Value head (mean-pool over planets) --
         Z_pooled = (Z * planet_mask.unsqueeze(-1)).sum(dim=1) / (
             planet_mask.sum(dim=1, keepdim=True) + 1e-8
         )
-
-        logits = self.policy_head(Z_pooled)
-        logits = logits.view(-1, self.max_sources, self.actions_per_source)
         value = self.value_head(Z_pooled)
 
-        return logits, value
+        return source_logits, slot_logits, value, ownership_mask

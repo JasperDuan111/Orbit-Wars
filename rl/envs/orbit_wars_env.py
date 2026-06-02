@@ -103,7 +103,8 @@ class OrbitWarsSelfPlayEnv:
         self._last_actions, self._last_source_ships = self._action_builder.build(obs)
         return obs
 
-    def step(self, action_indices, opponent_actions=None):
+    def step(self, action_indices, opponent_actions=None,
+             action_templates_override=None, source_ships_override=None):
         """Step the environment.
 
         Args:
@@ -111,13 +112,19 @@ class OrbitWarsSelfPlayEnv:
             opponent_actions: Optional dict mapping opp_idx_in_list -> action_list.
                 When provided, skips calling opponent.act() individually and
                 uses the pre-computed actions (enables batched GPU inference).
+            action_templates_override: Optional — use these templates instead of
+                stored _last_actions (for learned source selection).
+            source_ships_override: Optional — use these ships instead of
+                stored _last_source_ships.
         """
         obs = self._get_obs(self.player_index)
         player_id = _get_field(obs, "player", 0)
+        templates = action_templates_override if action_templates_override is not None else self._last_actions
+        ships = source_ships_override if source_ships_override is not None else self._last_source_ships
         my_action = self._action_builder.decode(
             action_indices,
-            self._last_actions,
-            self._last_source_ships,
+            templates,
+            ships,
             self.max_launches_per_source,
         )
         my_action, invalid_count = self._sanitize_action(my_action, obs, player_id)
