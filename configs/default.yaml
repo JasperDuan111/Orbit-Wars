@@ -31,14 +31,20 @@ model:
     num_gcn_layers: 2     # Number of graph convolution layers
 
 reward:
-  reward_scale: 0.01
-  invalid_action_penalty: 0.05
-  terminal_reward_scale: 0.01
-  win_reward: 100.0
-  lose_penalty: -100.0
-  planet_control_scale: 10
-  production_scale: 1
-  survival_reward: 0.01
+  economic_scale: 1.0
+  territory_scale: 2.0       
+  combat_efficiency_scale: 0.5
+  idle_penalty_scale: 0.1        
+  production_weight: 0.5          
+  idle_threshold: 0.5             
+  early_game_steps: 50
+  mid_game_steps: 200
+  survival_reward_early: 0.0
+  survival_reward_mid: 0.01
+  survival_reward_late: 0.05
+  terminal_win_scale: 5.0
+  terminal_lose_scale: -5.0
+  invalid_action_penalty: 0.1
 
 env:
   num_players: 2

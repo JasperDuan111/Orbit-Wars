@@ -72,14 +72,25 @@ class ModelConfig:
 
 @dataclass
 class RewardConfig:
-    reward_scale: float = 0.01
-    invalid_action_penalty: float = 0.05
-    terminal_reward_scale: float = 0.01
-    win_reward: float = 100.0
-    lose_penalty: float = -100.0
-    planet_control_scale: float = 10
-    production_scale: float = 1
-    survival_reward: float = 0.01
+    economic_scale: float = 1.0          # production-ratio delta weight
+    territory_scale: float = 2.0         # planet-capture event base weight
+    combat_efficiency_scale: float = 0.5 # kill-death exchange-ratio weight
+    idle_penalty_scale: float = 0.1      # idle-ships-on-planets penalty
+
+    production_weight: float = 0.5       # multiplier: 1 + prod × weight
+
+    idle_threshold: float = 0.5          # fraction above which idle penalty fires
+
+    early_game_steps: int = 50
+    mid_game_steps: int = 200
+    survival_reward_early: float = 0.0
+    survival_reward_mid: float = 0.01
+    survival_reward_late: float = 0.05
+
+    terminal_win_scale: float = 5.0
+    terminal_lose_scale: float = -5.0
+
+    invalid_action_penalty: float = 0.1
 
 
 @dataclass
