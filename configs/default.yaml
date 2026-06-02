@@ -50,7 +50,7 @@ env:
   num_players: 2
   episode_steps: 500
   act_timeout: 1
-  seed: 42
+  seed: null
   debug: false
 
 train:
