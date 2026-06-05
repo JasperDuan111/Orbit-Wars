@@ -56,10 +56,9 @@ class ActionSpaceConfig:
 
 @dataclass(frozen=True)
 class GNNConfig:
-    hg: int = 128
-    hf: int = 128
-    ha: int = 64
-    num_gcn_layers: int = 2
+    gcn_dims: Tuple[int, ...] = (128, 128)           # GCN output dims, one entry = one layer
+    fleet_attn_dims: Tuple[int, ...] = (128,)         # Fleet self-attention projection dims
+    cross_attn_dims: Tuple[int, ...] = (64,)          # Cross-attention projection dims
 
 
 @dataclass(frozen=True)

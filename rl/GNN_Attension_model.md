@@ -114,11 +114,47 @@ $$Z = Z_a W_p + Z_p$$
 
 ## 5. 输出层
 
-将 $Z$ 在 $N_1$ 维度上做平均池化，消掉星球数量维度：
+输出层由三个独立模块组成：**Source 选择**、**Slot 策略头**、**Value 头**。
 
-$$Z_{\text{pooled}} = \frac{1}{N_1}\sum_{i=1}^{N_1} Z_i \in \mathbb{R}^{h_g}$$
+### 5.1 Source 选择（学习型 Slot Query 注意力）
 
-将池化后的特征送入 MLP 输出头：
+引入 $S = \text{max\_sources}$ 个可学习查询向量 $Q_{\text{src}} \in \mathbb{R}^{S \times h_g}$，与星球特征做交叉注意力，为每个 slot 选出源星球：
 
-- **Policy Head**：$Z_{\text{pooled}}$ → MLP → $\mathbb{R}^{\text{max\_sources} \times \text{actions\_per\_source}}$
-- **Value Head**：$Z_{\text{pooled}}$ → MLP → $\mathbb{R}$
+$$K_{\text{src}} = Z_p W_{\text{src\_key}}, \quad W_{\text{src\_key}} \in \mathbb{R}^{h_g \times h_g}$$
+
+$$\text{source\_logits} = \frac{Q_{\text{src}} \, K_{\text{src}}^T}{\sqrt{h_g}} \in \mathbb{R}^{B \times S \times N_1}$$
+
+source_logits 随后由 ownership mask 约束（仅能选择己方星球），由 ActionBuilder 解析为具体的发射源星球索引。
+
+### 5.2 Slot 策略头（共享 MLP）
+
+对每个 slot 做 soft-attention 聚合星球特征，得到 slot embedding：
+
+$$\alpha_s = \text{softmax}(\text{source\_logits}_s \odot \text{ownership\_mask}) \in \mathbb{R}^{N_1}$$
+
+$$\text{slot\_emb}_s = \sum_{i=1}^{N_1} \alpha_{s,i} \cdot (Z_p)_i \in \mathbb{R}^{h_g}$$
+
+所有 slot embedding 送入**参数共享**的 MLP：
+
+$$\text{slot\_logits} = \text{MLP}_{\text{shared}}(\text{slot\_emb}) \in \mathbb{R}^{B \times S \times A}$$
+
+其中 $A = 1 + \text{max\_targets} \times \text{len}(\text{ship\_fractions})$，代表每 slot 的动作空间（含"不发射"）。共享 MLP 结构：$h_g \to h_g \to h_g \to A$，每层带 LayerNorm + GELU + Dropout。
+
+### 5.3 Value 头（加权平均池化）
+
+对 $Z_p$ 在星球维度做加权平均池化（仅统计真实星球，忽略 padding）：
+
+$$Z_{\text{pooled}} = \frac{\sum_{i=1}^{N_1} (Z_p)_i \cdot \mathbb{1}[\text{is\_real}(i)]}{\sum_{i=1}^{N_1} \mathbb{1}[\text{is\_real}(i)] + \varepsilon} \in \mathbb{R}^{h_g}$$
+
+$$V = \text{MLP}_{\text{value}}(Z_{\text{pooled}}) \in \mathbb{R}$$
+
+Value MLP 结构：$h_g \to h_g \to 1$（LayerNorm + GELU）。
+
+### 5.4 输出汇总
+
+| 输出 | 形状 | 用途 |
+|------|------|------|
+| `source_logits` | $(B, S, N_1)$ | 选择每 slot 的发射源星球 |
+| `slot_logits` | $(B, S, A)$ | 每 slot 的目标 + 舰船比例 |
+| `value` | $(B, 1)$ | 状态价值估计 |
+| `ownership_mask` | $(B, N_1)$ | 己方星球布尔掩码 |
