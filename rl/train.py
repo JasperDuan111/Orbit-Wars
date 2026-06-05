@@ -157,7 +157,7 @@ def main():
                         help="Save final model to this directory (auto-named as YYYYMMDD_{model_type}.pt)")
     parser.add_argument("--cleanup-checkpoints", action="store_true", default=False,
                         help="Delete checkpoint dir after saving final model")
-    parser.add_argument("--plot", action="store_true", default=True,
+    parser.add_argument("--plot", action="store_true", default=False,
                         help="Plot training curves (loss & reward) after training")
     parser.add_argument(
         "--max-launches-per-source",
