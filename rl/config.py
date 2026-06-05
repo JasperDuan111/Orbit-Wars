@@ -107,15 +107,15 @@ class TrainConfig:
     num_envs: int = 10
     total_updates: int = 2000
     rollout_steps: int = 64
-    gamma: float = 0.99
+    gamma: float = 0.999
     gae_lambda: float = 0.95
     clip_range: float = 0.2
-    learning_rate: float = 3e-4
-    ent_coef: float = 0.01
-    vf_coef: float = 0.5
-    max_grad_norm: float = 0.5
-    batch_size: int = 64
-    epochs: int = 4
+    learning_rate: float = 2e-4
+    ent_coef: float = 0.02
+    vf_coef: float = 1.0
+    max_grad_norm: float = 1.0
+    batch_size: int = 128
+    epochs: int = 3
     save_every: int = 50
     opponent_refresh: int = 10
 

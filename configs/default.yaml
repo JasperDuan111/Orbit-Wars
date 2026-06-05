@@ -15,9 +15,9 @@ obs:
   global_features: 6
 
 action:
-  max_sources: 20
+  max_sources: 12
   max_targets: 20
-  ship_fractions: [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]
+  ship_fractions: [0.25, 0.5, 0.75, 1.0]
   max_launches_per_source: 3
 
 model:
@@ -57,14 +57,14 @@ train:
   num_envs: 10
   total_updates: 2000
   rollout_steps: 64
-  gamma: 0.99
+  gamma: 0.999
   gae_lambda: 0.95
   clip_range: 0.2
-  learning_rate: 0.0003
-  ent_coef: 0.01
-  vf_coef: 0.5
-  max_grad_norm: 0.5
-  batch_size: 64
-  epochs: 4
+  learning_rate: 0.0002
+  ent_coef: 0.02
+  vf_coef: 1.0
+  max_grad_norm: 1.0
+  batch_size: 128
+  epochs: 3
   save_every: 50
   opponent_refresh: 10
