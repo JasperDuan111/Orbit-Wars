@@ -232,7 +232,7 @@ class ActorCriticGNN(nn.Module):
         slot_logits = self.slot_policy_head(slot_embs)
 
         # -- 7. Value head (mean-pool over planets) --
-        Z_pooled = (Z * planet_mask.unsqueeze(-1)).sum(dim=1) / (
+        Zp_pooled = (Zp * planet_mask.unsqueeze(-1)).sum(dim=1) / (
             planet_mask.sum(dim=1, keepdim=True) + 1e-8
         )  # (B, hg)
         Zf_pooled = (Zf * fleet_mask.unsqueeze(-1)).sum(dim=1) / (
