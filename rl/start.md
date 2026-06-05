@@ -138,7 +138,7 @@ rl/
 
 8. **价值头** `value_head`：mean-pool(Z) → MLP → `value(B, 1)`
 
-**参数量**（默认 GNN 配置）：~0.9M trainable params。
+**参数量**（默认 GNN 配置）：~0.1M trainable params。
 
 ---
 
