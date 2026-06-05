@@ -5,7 +5,13 @@ import torch
 from torch.amp import autocast, GradScaler
 from torch.nn.utils import clip_grad_norm_
 
-from .action import logprob_for_action_sequence, select_sources, source_selection_logprob
+from .action import (
+    _build_frac_array,
+    _compute_max_valid_idx,
+    _compute_step_valid,
+    logprob_for_action_sequence_batched,
+    source_selection_logprob,
+)
 from .config import ActionSpaceConfig, DEFAULT_CONFIG
 
 
@@ -112,17 +118,43 @@ class PPOTrainer:
         self.scaler = GradScaler("cuda") if use_amp else None
         self.action_config = action_config or DEFAULT_CONFIG.action
         self.max_launches = self.action_config.max_launches_per_source
+        self._frac_array = _build_frac_array(self.action_config)
 
     def update(self, buffer):
         advantages = buffer.advantages.reshape(-1)
         advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
         old_values = buffer.values.reshape(-1)
+        # Use raw returns directly — standard PPO practice.
+        # The value head needs to learn actual return magnitudes so that
+        # GAE deltas accurately capture state-to-state variation.
+        # Advantages get normalized; returns do not.
+        flat_returns = buffer.returns.reshape(-1)
         stats = {"policy_loss": 0.0, "value_loss": 0.0, "entropy": 0.0}
         updates = 0
 
+        # Pre-compute static CPU structures for all (T*E) samples — invariant across epochs.
+        total = buffer.rollout_steps * buffer.num_envs
+        flat_all_actions = buffer.actions.reshape(total, *buffer.actions.shape[2:])  # (T*E, S, L)
+        flat_all_templates = [
+            buffer.action_templates[t][e]
+            for t in range(buffer.rollout_steps) for e in range(buffer.num_envs)
+        ]
+        flat_all_ships = [
+            buffer.source_ships[t][e]
+            for t in range(buffer.rollout_steps) for e in range(buffer.num_envs)
+        ]
+        max_valid_idx_all = _compute_max_valid_idx(
+            flat_all_templates,
+            self.action_config.max_sources,
+            self.action_config.actions_per_source,
+        )
+        step_valid_all = _compute_step_valid(
+            flat_all_actions, flat_all_ships, self._frac_array, self.max_launches,
+        )
+
         for _ in range(self.epochs):
             for batch_idx, obs, actions, old_logprobs, returns, adv, raw_obs, \
-                templates_list, ships_list, source_indices_list in buffer.get(
+                _templates_list, _ships_list, source_indices_list in buffer.get(
                 self.batch_size
             ):
                 if self.use_amp:
@@ -134,25 +166,23 @@ class PPOTrainer:
 
                 adv = advantages[batch_idx]
 
-                new_logprobs = []
-                entropies = []
-                for i in range(len(raw_obs)):
-                    src_lp = source_selection_logprob(
-                        source_logits[i], ownership_mask[i], source_indices_list[i]
-                    )
-                    slot_lp, entropy = logprob_for_action_sequence(
-                        slot_logits[i],
-                        templates_list[i],
-                        ships_list[i],
-                        actions[i],
-                        max_launches=self.max_launches,
-                        action_config=self.action_config,
-                    )
-                    new_logprobs.append(src_lp + slot_lp)
-                    entropies.append(entropy)
+                # Batched slot logprob — single Categorical call for the whole batch.
+                slot_lps, entropies_sum, src_counts = logprob_for_action_sequence_batched(
+                    slot_logits,
+                    max_valid_idx_all[batch_idx],
+                    actions,
+                    step_valid_all[batch_idx],
+                )
 
-                new_logprobs = torch.stack(new_logprobs)
-                entropies = torch.stack(entropies)
+                # Source-selection logprob (per-sample Plackett-Luce; k ≤ 20, lightweight).
+                src_lps = []
+                for i in range(len(raw_obs)):
+                    src_lps.append(source_selection_logprob(
+                        source_logits[i], ownership_mask[i], source_indices_list[i],
+                    ))
+                src_lps = torch.stack(src_lps)
+
+                new_logprobs = src_lps + slot_lps
 
                 ratios = torch.exp(new_logprobs - old_logprobs)
                 surr1 = ratios * adv
@@ -162,11 +192,16 @@ class PPOTrainer:
                 value_pred_clipped = old_values[batch_idx] + torch.clamp(
                     values - old_values[batch_idx], -self.clip_range, self.clip_range
                 )
-                value_loss_1 = (returns - values).pow(2)
-                value_loss_2 = (returns - value_pred_clipped).pow(2)
+                rets = flat_returns[batch_idx]
+                value_loss_1 = (rets - values).pow(2)
+                value_loss_2 = (rets - value_pred_clipped).pow(2)
                 value_loss = 0.5 * torch.max(value_loss_1, value_loss_2).mean()
 
-                entropy = entropies.mean()
+                # Per-source entropy (not summed across sources) so that the
+                # entropy bonus is proportional to the average randomness per
+                # decision, not the raw number of active sources.
+                avg_entropy_per_source = entropies_sum / (src_counts + 1)  # (B,)
+                entropy = avg_entropy_per_source.mean()
                 loss = policy_loss + self.vf_coef * value_loss - self.ent_coef * entropy
 
                 self.optimizer.zero_grad()

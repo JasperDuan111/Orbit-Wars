@@ -170,15 +170,29 @@ class OrbitWarsSelfPlayEnv:
         return obs, reward, self._is_done(), info
 
     def _compute_reward(self, obs, player_id):
-        """Six-dimension reward (all components ∈ [−1, +1] per step).
+        """Multi-dimension reward with dense per-step signals.
         Returns: (my_total, enemy_total, diff, reward)
         """
         step = _get_field(obs, "step", 0)
+        total_steps = _get_field(obs, "episodeSteps", 500)
         my_total, enemy_total = ship_totals(obs, player_id)
         diff = my_total - enemy_total
+        total_ships = my_total + enemy_total + 1
         reward = 0.0
 
         my_prod, eny_prod = _planet_production_totals(obs, player_id)
+
+        # ── Dense rewards (every step) ──
+        # 1. Ship-count advantage: normalized to roughly [-1, +1] per step
+        ship_advantage = diff / total_ships
+        reward += ship_advantage * 0.05  # small per-step signal
+
+        # 2. Production advantage: normalized to roughly [-1, +1] per step
+        prod_total = my_prod + eny_prod + 1
+        prod_advantage = (my_prod - eny_prod) / prod_total
+        reward += prod_advantage * 0.05
+
+        # ── Delta rewards (sparse but informative) ──
         cur_econ_ratio = my_prod / (my_prod + eny_prod + 1.0)
         if self._last_econ_ratio is not None:
             reward += (cur_econ_ratio - self._last_econ_ratio) * self.economic_scale
@@ -216,6 +230,8 @@ class OrbitWarsSelfPlayEnv:
             else:
                 reward += self.survival_reward_late
 
+        # ── Terminal reward ──
+        # Also give a scaled survival bonus based on how long the agent survived
         if self._is_done():
             if diff > 0:
                 reward += self.terminal_win_scale

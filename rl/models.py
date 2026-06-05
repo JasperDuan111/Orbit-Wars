@@ -54,6 +54,11 @@ class ActorCritic(nn.Module):
         source_logits = self.fallback_source_logits.expand(B, self.max_sources, 1)
         # ownership_mask: dummy True for all "planets" (MLP model doesn't use real planets)
         ownership_mask = torch.ones(B, 1, dtype=torch.bool, device=obs.device)
+        # NaN guard: corrupted weights can produce NaN in any head output.
+        # Intercept here before NaN leaks into logprobs, value loss, and GAE.
+        source_logits = source_logits.nan_to_num(0.0)
+        slot_logits = slot_logits.nan_to_num(0.0)
+        value = value.nan_to_num(0.0)
         return source_logits, slot_logits, value, ownership_mask
 
 
@@ -126,12 +131,19 @@ class ActorCriticGNN(nn.Module):
             nn.Linear(self.hg, actions_per_source),
         )
 
-        # 7. Value head (still mean-pooled)
+        # 7. Value head — pools planet, fleet, and global features together.
+        # Fleet features are mean-pooled (masked), concatenated with planet
+        # mean-pool and global features, then fed through a small MLP.
+        value_input_dim = self.hg + self.hf + self.global_features
         self.value_head = nn.Sequential(
-            nn.Linear(self.hg, self.hg),
+            nn.Linear(value_input_dim, self.hg),
             nn.LayerNorm(self.hg),
             nn.GELU(),
-            nn.Linear(self.hg, 1),
+            nn.Dropout(self.dropout),
+            nn.Linear(self.hg, self.hg // 2),
+            nn.LayerNorm(self.hg // 2),
+            nn.GELU(),
+            nn.Linear(self.hg // 2, 1),
         )
 
     def forward(self, obs_flat):
@@ -166,7 +178,7 @@ class ActorCriticGNN(nn.Module):
 
         # Graph convolution
         for gcn in self.gcn_layers:
-            Zp = gcn(torch.bmm(Ag, Zp))
+            Zp = gcn(torch.bmm(Ag, Zp)).nan_to_num(0)
 
         # -- 3. Fleet self-attention --
         Qf = self.fleet_q(Zf)
@@ -199,7 +211,7 @@ class ActorCriticGNN(nn.Module):
         K_src = self.source_key(Z)  # (B, max_planets, hg)
         source_logits = torch.bmm(Q_src, K_src.transpose(1, 2)) / (self.hg ** 0.5)
         # source_logits: (B, max_sources, max_planets)
-
+ 
         # -- 6. Per-slot target+fraction logits --
         # Soft-attend over planets per slot to get slot embedding
         # Mask to owned planets for source attention
@@ -212,10 +224,19 @@ class ActorCriticGNN(nn.Module):
         # Shared MLP over each slot embedding → (B, max_sources, actions_per_source)
         slot_logits = self.slot_policy_head(slot_embs)
 
-        # -- 7. Value head (mean-pool over planets) --
-        Z_pooled = (Z * planet_mask.unsqueeze(-1)).sum(dim=1) / (
+        # -- 7. Value head (pool planets, fleets, and global features) --
+        Zp_pooled = (Z * planet_mask.unsqueeze(-1)).sum(dim=1) / (
             planet_mask.sum(dim=1, keepdim=True) + 1e-8
-        )
-        value = self.value_head(Z_pooled)
+        )  # (B, hg)
+        Zf_pooled = (Zf * fleet_mask.unsqueeze(-1)).sum(dim=1) / (
+            fleet_mask.sum(dim=1, keepdim=True) + 1e-8
+        )  # (B, hf)
+        value_input = torch.cat([Zp_pooled, Zf_pooled, global_feat], dim=-1)  # (B, hg+hf+global)
+        value = self.value_head(value_input)
 
+        # NaN guard: corrupted weights can produce NaN in any head output.
+        # Intercept here before NaN leaks into logprobs, value loss, and GAE.
+        source_logits = source_logits.nan_to_num(0.0)
+        slot_logits = slot_logits.nan_to_num(0.0)
+        value = value.nan_to_num(0.0)
         return source_logits, slot_logits, value, ownership_mask
