@@ -25,9 +25,9 @@ model:
   hidden_sizes: [512, 512, 256]  # only used by mlp model
   dropout: 0.1
   gnn:                          # GNN+Attention model hyperparameters
-    gcn_dims: [128, 128]        # GCN output dims per layer (list length = number of layers)
-    fleet_attn_dims: [128, 128]      # Fleet self-attention projection dims
-    cross_attn_dims: [64, 64]       # Cross-attention projection dims
+    gcn_dims: [256, 128, 128]        # GCN output dims per layer (list length = number of layers)
+    fleet_attn_dims: [512, 256, 128]      # Fleet self-attention projection dims
+    cross_attn_dims: [512, 256, 128]       # Cross-attention projection dims
 
 reward:
   economic_scale: 1.0
