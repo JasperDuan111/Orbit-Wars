@@ -24,11 +24,10 @@ model:
   model_type: "gnn"       # "mlp" (baseline) or "gnn" (GNN+Attention)
   hidden_sizes: [512, 512, 256]  # only used by mlp model
   dropout: 0.1
-  gnn:                    # GNN+Attention model hyperparameters
-    hg: 128               # GCN hidden dim (planet graph convolution)
-    hf: 128               # Fleet self-attention hidden dim
-    ha: 64                # Cross-attention head dim
-    num_gcn_layers: 2     # Number of graph convolution layers
+  gnn:                          # GNN+Attention model hyperparameters
+    gcn_dims: [128, 128]        # GCN output dims per layer (list length = number of layers)
+    fleet_attn_dims: [128, 128]      # Fleet self-attention projection dims
+    cross_attn_dims: [64, 64]       # Cross-attention projection dims
 
 reward:
   economic_scale: 1.0

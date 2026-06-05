@@ -84,10 +84,11 @@ class ActorCriticGNN(nn.Module):
         self.actions_per_source = actions_per_source
         self.max_sources = max_sources
 
-        self.hg = gnn_cfg.hg
-        self.hf = gnn_cfg.hf
-        self.ha = gnn_cfg.ha
-        self.num_gcn_layers = gnn_cfg.num_gcn_layers
+        self.gcn_dims = list(gnn_cfg.gcn_dims)
+        self.fleet_attn_dims = list(gnn_cfg.fleet_attn_dims)
+        self.cross_attn_dims = list(gnn_cfg.cross_attn_dims)
+        self.hg = self.gcn_dims[-1]                     # final GCN output dim
+        self.hf = self.fleet_attn_dims[-1]               # final fleet attention output dim
         self.dropout = config.dropout
 
         # 2.1 Learnable adjacency matrix weight
@@ -96,27 +97,35 @@ class ActorCriticGNN(nn.Module):
         # 2.2 Graph convolution layers
         self.gcn_layers = nn.ModuleList()
         in_dim = self.planet_features
-        for _ in range(self.num_gcn_layers):
+        for out_dim in self.gcn_dims:
             self.gcn_layers.append(nn.Sequential(
-                nn.Linear(in_dim, self.hg),
-                nn.LayerNorm(self.hg),
+                nn.Linear(in_dim, out_dim),
+                nn.LayerNorm(out_dim),
                 nn.GELU(),
                 nn.Dropout(self.dropout),
             ))
-            in_dim = self.hg
+            in_dim = out_dim
 
-        # 3. Fleet self-attention QKV projections
-        self.fleet_q = nn.Linear(self.fleet_features, self.hf)
-        self.fleet_k = nn.Linear(self.fleet_features, self.hf)
-        self.fleet_v = nn.Linear(self.fleet_features, self.hf)
+        # 3. Fleet self-attention (stacked layers, each with own QKV)
+        self.fleet_attn_layers = nn.ModuleList()
+        in_dim = self.fleet_features
+        for out_dim in self.fleet_attn_dims:
+            self.fleet_attn_layers.append(nn.ModuleDict({
+                'q': nn.Linear(in_dim, out_dim),
+                'k': nn.Linear(in_dim, out_dim),
+                'v': nn.Linear(in_dim, out_dim),
+            }))
+            in_dim = out_dim
 
-        # 4. Cross-attention QKV projections
-        self.cross_q = nn.Linear(self.hg, self.ha)
-        self.cross_k = nn.Linear(self.hf, self.ha)
-        self.cross_v = nn.Linear(self.hf, self.ha)
-
-        # 4.3 Residual projection
-        self.Wp = nn.Linear(self.ha, self.hg)
+        # 4. Cross-attention (stacked layers, each with own QKV + residual projection)
+        self.cross_attn_layers = nn.ModuleList()
+        for out_dim in self.cross_attn_dims:
+            self.cross_attn_layers.append(nn.ModuleDict({
+                'q': nn.Linear(self.hg, out_dim),
+                'k': nn.Linear(self.hf, out_dim),
+                'v': nn.Linear(self.hf, out_dim),
+                'proj': nn.Linear(out_dim, self.hg),
+            }))
 
         # 5. Per-slot source selection via learned query vectors
         self.source_query = nn.Parameter(torch.randn(max_sources, self.hg) * 0.02)
@@ -180,35 +189,33 @@ class ActorCriticGNN(nn.Module):
         for gcn in self.gcn_layers:
             Zp = gcn(torch.bmm(Ag, Zp)).nan_to_num(0)
 
-        # -- 3. Fleet self-attention --
-        Qf = self.fleet_q(Zf)
-        Kf = self.fleet_k(Zf)
-        Vf = self.fleet_v(Zf)
+        # -- 3. Fleet self-attention (stacked layers) --
+        for layer, d in zip(self.fleet_attn_layers, self.fleet_attn_dims):
+            Qf = layer['q'](Zf)
+            Kf = layer['k'](Zf)
+            Vf = layer['v'](Zf)
+            attn_f = torch.bmm(Qf, Kf.transpose(1, 2)) / (d ** 0.5)
+            f_mask_2d = fleet_mask.unsqueeze(1) * fleet_mask.unsqueeze(2)
+            attn_f = attn_f.masked_fill(f_mask_2d == 0, float('-inf'))
+            attn_f = torch.softmax(attn_f, dim=-1).nan_to_num(0)
+            Zf = torch.bmm(attn_f, Vf)
 
-        attn_f = torch.bmm(Qf, Kf.transpose(1, 2)) / (self.hf ** 0.5)
-        f_mask_2d = fleet_mask.unsqueeze(1) * fleet_mask.unsqueeze(2)
-        attn_f = attn_f.masked_fill(f_mask_2d == 0, float('-inf'))
-        attn_f = torch.softmax(attn_f, dim=-1).nan_to_num(0)
-        Zf = torch.bmm(attn_f, Vf)
-
-        # -- 4. Cross-attention: planets attend to fleets --
-        Q = self.cross_q(Zp)
-        K = self.cross_k(Zf)
-        V = self.cross_v(Zf)
-
-        attn_c = torch.bmm(Q, K.transpose(1, 2)) / (self.ha ** 0.5)
-        c_mask = planet_mask.unsqueeze(2) * fleet_mask.unsqueeze(1)
-        attn_c = attn_c.masked_fill(c_mask == 0, float('-inf'))
-        attn_c = torch.softmax(attn_c, dim=-1).nan_to_num(0)
-        Za = torch.bmm(attn_c, V)
-
-        # 4.3 Residual connection
-        Z = self.Wp(Za) + Zp  # (B, max_planets, hg)
+        # -- 4. Cross-attention: planets attend to fleets (stacked layers with residual) --
+        for layer, d in zip(self.cross_attn_layers, self.cross_attn_dims):
+            Q = layer['q'](Zp)
+            K = layer['k'](Zf)
+            V = layer['v'](Zf)
+            attn_c = torch.bmm(Q, K.transpose(1, 2)) / (d ** 0.5)
+            c_mask = planet_mask.unsqueeze(2) * fleet_mask.unsqueeze(1)
+            attn_c = attn_c.masked_fill(c_mask == 0, float('-inf'))
+            attn_c = torch.softmax(attn_c, dim=-1).nan_to_num(0)
+            Za = torch.bmm(attn_c, V)
+            Zp = layer['proj'](Za) + Zp  # residual back to hg
 
         # -- 5. Per-slot source selection via attention --
         # slot_query: (1, max_sources, hg) → expand to (B, max_sources, hg)
         Q_src = self.source_query.unsqueeze(0).expand(B, -1, -1)  # (B, max_sources, hg)
-        K_src = self.source_key(Z)  # (B, max_planets, hg)
+        K_src = self.source_key(Zp)  # (B, max_planets, hg)
         source_logits = torch.bmm(Q_src, K_src.transpose(1, 2)) / (self.hg ** 0.5)
         # source_logits: (B, max_sources, max_planets)
  
@@ -219,13 +226,13 @@ class ActorCriticGNN(nn.Module):
         src_attn = torch.softmax(
             source_logits.masked_fill(src_mask == 0, float('-inf')), dim=-1
         ).nan_to_num(0)  # (B, max_sources, max_planets)
-        slot_embs = torch.bmm(src_attn, Z)  # (B, max_sources, hg)
+        slot_embs = torch.bmm(src_attn, Zp)  # (B, max_sources, hg)
 
         # Shared MLP over each slot embedding → (B, max_sources, actions_per_source)
         slot_logits = self.slot_policy_head(slot_embs)
 
-        # -- 7. Value head (pool planets, fleets, and global features) --
-        Zp_pooled = (Z * planet_mask.unsqueeze(-1)).sum(dim=1) / (
+        # -- 7. Value head (mean-pool over planets) --
+        Z_pooled = (Z * planet_mask.unsqueeze(-1)).sum(dim=1) / (
             planet_mask.sum(dim=1, keepdim=True) + 1e-8
         )  # (B, hg)
         Zf_pooled = (Zf * fleet_mask.unsqueeze(-1)).sum(dim=1) / (
