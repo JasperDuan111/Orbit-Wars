@@ -46,61 +46,6 @@ def _format_result(r: float) -> str:
     return f"{r:.4f}"
 
 
-def _plot_training_curves(history: dict, log_dir: str, timestamp: str):
-    """Plot training curves (reward, policy loss, value loss, entropy)."""
-    try:
-        import matplotlib.pyplot as plt
-    except ImportError:
-        print("[WARNING] matplotlib not installed.  Install it with: pip install matplotlib")
-        return
-
-    updates = history["updates"]
-
-    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
-    fig.suptitle(f"Orbit Wars PPO Training Curves ({timestamp})", fontsize=14, fontweight="bold")
-
-    # Reward
-    ax = axes[0, 0]
-    ax.plot(updates, history["rewards"], color="#2196F3", linewidth=1.0, alpha=0.9)
-    ax.set_title("Mean Reward")
-    ax.set_xlabel("Update")
-    ax.set_ylabel("Reward")
-    ax.grid(True, alpha=0.3)
-
-    # Policy Loss
-    ax = axes[0, 1]
-    ax.plot(updates, history["policy_loss"], color="#F44336", linewidth=1.0, alpha=0.9)
-    ax.set_title("Policy Loss")
-    ax.set_xlabel("Update")
-    ax.set_ylabel("Loss")
-    ax.grid(True, alpha=0.3)
-
-    # Value Loss
-    ax = axes[1, 0]
-    ax.plot(updates, history["value_loss"], color="#FF9800", linewidth=1.0, alpha=0.9)
-    ax.set_title("Value Loss")
-    ax.set_xlabel("Update")
-    ax.set_ylabel("Loss")
-    ax.grid(True, alpha=0.3)
-
-    # Entropy
-    ax = axes[1, 1]
-    ax.plot(updates, history["entropy"], color="#4CAF50", linewidth=1.0, alpha=0.9)
-    ax.set_title("Entropy")
-    ax.set_xlabel("Update")
-    ax.set_ylabel("Entropy")
-    ax.grid(True, alpha=0.3)
-
-    plt.tight_layout()
-
-    plot_path = os.path.join(log_dir, f"training_curves_{timestamp}.png")
-    fig.savefig(plot_path, dpi=150, bbox_inches="tight")
-    print(f"Training curves saved to: {plot_path}")
-
-    plt.show()
-    plt.close(fig)
-
-
 class Logger:
     """Write to both console and log file."""
     def __init__(self, log_file: str):
@@ -157,8 +102,6 @@ def main():
                         help="Save final model to this directory (auto-named as YYYYMMDD_{model_type}.pt)")
     parser.add_argument("--cleanup-checkpoints", action="store_true", default=False,
                         help="Delete checkpoint dir after saving final model")
-    parser.add_argument("--plot", action="store_true", default=False,
-                        help="Plot training curves (loss & reward) after training")
     parser.add_argument(
         "--max-launches-per-source",
         type=int,
@@ -307,20 +250,6 @@ def main():
         env.set_opponent(pool.sample())
 
     obs_list = [env.reset() for env in envs]
-
-    # Training history for plotting (only collected when --plot is enabled)
-    do_plot = args.plot
-    history = (
-        {
-            "updates": [],
-            "rewards": [],
-            "policy_loss": [],
-            "value_loss": [],
-            "entropy": [],
-        }
-        if do_plot
-        else None
-    )
 
     # Training loop
     total_start_time = time.time()
@@ -506,14 +435,6 @@ def main():
             writer.add_scalar("train/entropy", stats["entropy"], update)
             writer.add_scalar("train/learning_rate", optimizer.param_groups[0]["lr"], update)
 
-            # Collect history for plotting
-            if do_plot:
-                history["updates"].append(update)
-                history["rewards"].append(mean_reward)
-                history["policy_loss"].append(stats["policy_loss"])
-                history["value_loss"].append(stats["value_loss"])
-                history["entropy"].append(stats["entropy"])
-
             train_ratio = f"{train_time/update_time*100:.2f}"
             # if update % 10 == 0 or update == start_update:
             # Log per-step timing
@@ -560,10 +481,6 @@ def main():
         print(f"Total time: {_format_time(total_time)}")
         print(f"Average per update: {_format_time(avg_time)}")
         print("-" * 60)
-
-        # Plot training curves (only if --plot flag is set)
-        if do_plot and len(history["updates"]) > 0:
-            _plot_training_curves(history, log_dir, timestamp)
 
         writer.close()
         sys.stdout = logger.console
