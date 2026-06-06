@@ -297,7 +297,7 @@ def sample_action_sequence(
     """Sample target actions and return action indices + logprobs.
 
     Args:
-        logits: (S, A) per-slot target logits.
+        logits: (S, L, A) per-slot per-launch target logits.
         actions: per-source action template lists.
         source_ships: per-source available ships.
         max_launches: max launch steps per source.
@@ -332,14 +332,16 @@ def sample_action_sequence(
         source_actions = actions[src_idx]
         n_slots = len(source_actions)
 
-        # Build mask & distribution ONCE per source.
-        mask = _build_source_mask(source_actions, n_slots, device)
-        src_logits = logits[src_idx].to(torch.float32).nan_to_num(0.0)
-        masked_logits = src_logits.masked_fill(mask == 0, float('-inf'))
-        dist = Categorical(logits=masked_logits)
-        entropy_sum = entropy_sum + dist.entropy()
+        # Build mask ONCE per source: same validity for all launches
+        mask = _build_source_mask(source_actions, n_slots, device)  # (A,)
 
         for step_idx in range(L):
+            # Each launch step has its own logits
+            src_logits_l = logits[src_idx, step_idx].to(torch.float32).nan_to_num(0.0)
+            masked_logits = src_logits_l.masked_fill(mask == 0, float('-inf'))
+            dist = Categorical(logits=masked_logits)
+            entropy_sum = entropy_sum + dist.entropy()
+
             if deterministic:
                 action = torch.argmax(masked_logits)
             else:
@@ -380,6 +382,9 @@ def logprob_for_action_sequence(
     """Compute log-probability and entropy for a given action sequence.
 
     Fraction values do not contribute to logprob (treated as deterministic).
+    
+    Args:
+        logits: (S, L, A) per-slot per-launch target logits.
     """
     device = logits.device
     config = action_config or DEFAULT_CONFIG.action
@@ -399,18 +404,18 @@ def logprob_for_action_sequence(
         source_actions = actions[src_idx]
         n_slots = len(source_actions)
 
-        # Build mask & distribution ONCE per source.
         mask = _build_source_mask(source_actions, n_slots, device)
-        src_logits = logits[src_idx].to(torch.float32).nan_to_num(0.0)
-        masked_logits = src_logits.masked_fill(mask == 0, float('-inf'))
-        dist = Categorical(logits=masked_logits)
-        entropy_sum = entropy_sum + dist.entropy()
 
         for step_idx in range(max_launches):
             try:
                 action_idx = int(action_indices[src_idx, step_idx].item())
             except (TypeError, ValueError, IndexError):
                 break
+            # Each launch step has its own logits
+            src_logits_l = logits[src_idx, step_idx].to(torch.float32).nan_to_num(0.0)
+            masked_logits = src_logits_l.masked_fill(mask == 0, float('-inf'))
+            dist = Categorical(logits=masked_logits)
+            entropy_sum = entropy_sum + dist.entropy()
             logprob_sum = logprob_sum + dist.log_prob(action_indices[src_idx, step_idx])
 
             if action_idx <= 0:
@@ -418,7 +423,6 @@ def logprob_for_action_sequence(
             template = source_actions[action_idx]
             if template is None:
                 break
-            # Use continuous fraction
             frac = 1.0
             if fractions is not None and src_idx < fractions.shape[0] and step_idx < fractions.shape[1]:
                 frac = float(fractions[src_idx, step_idx].item())
@@ -519,7 +523,7 @@ def logprob_for_action_sequence_batched(
     Only target selection contributes to the policy gradient.
 
     Args:
-        slot_logits:   (B, S, A) per-slot logits (target selection only).
+        slot_logits:   (B, S, L, A) per-slot per-launch logits (target selection only).
         max_valid_idx: (B, S)   max valid action index per source (CPU, moved to GPU).
         action_indices:(B, S, L) discrete action indices.
         step_valid:    (B, S, L) bool mask: which steps actually executed (CPU→GPU).
@@ -529,43 +533,41 @@ def logprob_for_action_sequence_batched(
         entropy_sum: (B,)  sum of entropies over active sources.
         source_active_count: (B,) number of active sources per sample.
     """
-    B, S, A = slot_logits.shape
+    B, S, L, A = slot_logits.shape
     device = slot_logits.device
     needs_cast = slot_logits.dtype == torch.float16
 
-    max_valid_idx = max_valid_idx.to(device).clamp(min=0)
-    step_valid = step_valid.to(device)
+    max_valid_idx = max_valid_idx.to(device).clamp(min=0)  # (B, S)
+    step_valid = step_valid.to(device)                       # (B, S, L)
 
-    # Build mask: position <= max_valid_idx → valid (at least slot 0 always)
-    positions = torch.arange(A, device=device).view(1, 1, A)  # (1, 1, A)
-    mask = positions <= max_valid_idx.unsqueeze(-1)            # (B, S, A)
+    # Build mask: position <= max_valid_idx → valid
+    # Expand max_valid_idx from (B, S) to (B, S, 1, 1) for proper broadcasting
+    positions = torch.arange(A, device=device).view(1, 1, 1, A)          # (1, 1, 1, A)
+    max_valid_4d = max_valid_idx[:, :, None, None]                        # (B, S, 1, 1)
+    mask = (positions <= max_valid_4d).expand(-1, -1, L, -1)             # (B, S, L, A)
 
     # Force float32 and guard against any upstream NaN in logits.
     logits_f32 = slot_logits.to(torch.float32).nan_to_num(0.0)
-    fill_value = _mask_fill_value(torch.float32)  # ≈ -3.4e38, safe for float32 exp
+    fill_value = _mask_fill_value(torch.float32)
     masked_logits = logits_f32.masked_fill(~mask, fill_value)
 
-    # One Categorical call for the entire batch: (B*S, A)
-    flat_logits = masked_logits.reshape(B * S, A)
+    # One Categorical call for the entire batch: (B*S*L, A)
+    flat_logits = masked_logits.reshape(B * S * L, A)
     dist = Categorical(logits=flat_logits)
 
-    L = action_indices.shape[-1]
-    flat_actions = action_indices.reshape(B * S, L)
+    flat_actions = action_indices.reshape(B * S * L)  # (B*S*L,)
+    all_logprobs = dist.log_prob(flat_actions).reshape(B, S, L)  # (B, S, L)
+    entropy = dist.entropy().reshape(B, S, L)                     # (B, S, L)
 
-    # Categorical.log_prob expects 1D (batch_shape,); compute per launch step.
-    all_logprobs = torch.zeros(B * S, L, device=device)
-    for l in range(L):
-        all_logprobs[:, l] = dist.log_prob(flat_actions[:, l])
-    all_logprobs = all_logprobs.reshape(B, S, L)
-
-    entropy = dist.entropy().reshape(B, S)
-
-    # Mask entropy to only active sources (remaining > 0), matching per-sample behavior.
-    source_active = step_valid.any(dim=-1).float()  # (B, S)
-    logprob_sum = (all_logprobs * step_valid.float()).sum(dim=(1, 2))  # (B,)
+    # Mask entropy to only active (source, launch) pairs
+    step_valid_float = step_valid.float()               # (B, S, L)
+    logprob_sum = (all_logprobs * step_valid_float).sum(dim=(1, 2))  # (B,)
     if needs_cast:
         logprob_sum = logprob_sum.half()
-    entropy_sum = (entropy * source_active).sum(dim=1)  # (B,)
-    source_active_count = source_active.sum(dim=1)  # (B,) — number of active sources per sample
+
+    # Per-source active count for entropy normalization
+    source_active = step_valid.any(dim=-1).float()      # (B, S)
+    entropy_sum = (entropy * step_valid_float).sum(dim=(1, 2))  # (B,)
+    source_active_count = source_active.sum(dim=1)      # (B,)
 
     return logprob_sum, entropy_sum, source_active_count

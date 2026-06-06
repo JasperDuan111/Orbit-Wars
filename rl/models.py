@@ -38,7 +38,7 @@ class ActorCritic(nn.Module):
         self.max_sources = max_sources
         self.max_launches = max_launches
         self.body = _build_mlp(obs_dim, hidden_sizes, hidden_sizes[-1], dropout)
-        self.slot_policy_head = nn.Linear(hidden_sizes[-1], max_sources * actions_per_source)
+        self.slot_policy_head = nn.Linear(hidden_sizes[-1], max_sources * max_launches * actions_per_source)
         # Continuous fraction head: outputs raw values, sigmoid applied in forward
         self.fraction_head = nn.Linear(hidden_sizes[-1], max_sources * max_launches)
         self.value_head = nn.Linear(hidden_sizes[-1], 1)
@@ -51,7 +51,7 @@ class ActorCritic(nn.Module):
         B = obs.shape[0]
         features = self.body(obs)
         slot_logits = self.slot_policy_head(features)
-        slot_logits = slot_logits.view(B, self.max_sources, self.actions_per_source)
+        slot_logits = slot_logits.view(B, self.max_sources, self.max_launches, self.actions_per_source)
         # Fraction: raw → sigmoid → [0, 1]
         fraction_raw = self.fraction_head(features)
         fraction_values = torch.sigmoid(fraction_raw).view(B, self.max_sources, self.max_launches)
@@ -141,13 +141,13 @@ class ActorCriticGNN(nn.Module):
         self.source_query = nn.Parameter(torch.randn(max_sources, self.hg) * 0.02)
         self.source_key = nn.Linear(self.hg, self.hg, bias=False)
 
-        # 6. Per-slot target selection head (shared across slots)
+        # 6. Per-slot per-launch target selection head (shared across slots & launches)
         self.slot_policy_head = nn.Sequential(
             nn.Linear(self.hg, self.hg),
             nn.LayerNorm(self.hg),
             nn.GELU(),
             nn.Dropout(self.dropout),
-            nn.Linear(self.hg, actions_per_source),
+            nn.Linear(self.hg, max_launches * actions_per_source),
         )
 
         # 6b. Continuous fraction head (per slot, per launch step)
@@ -247,8 +247,9 @@ class ActorCriticGNN(nn.Module):
         ).nan_to_num(0)  # (B, max_sources, max_planets)
         slot_embs = torch.bmm(src_attn, Zp)  # (B, max_sources, hg)
 
-        # Shared MLP over each slot embedding → (B, max_sources, actions_per_source)
+        # Shared MLP over each slot embedding → (B, max_sources, max_launches * actions_per_source)
         slot_logits = self.slot_policy_head(slot_embs)
+        slot_logits = slot_logits.view(B, self.max_sources, self.max_launches, self.actions_per_source)
 
         # -- 6b. Continuous fraction per slot, per launch step --
         fraction_raw = self.fraction_head(slot_embs)  # (B, max_sources, max_launches)
