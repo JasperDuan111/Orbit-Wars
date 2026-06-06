@@ -230,6 +230,7 @@ def main():
             obs_config=config.obs,
             actions_per_source=config.action.actions_per_source,
             max_sources=config.action.max_sources,
+            max_launches=config.action.max_launches_per_source,
             model_config=config.model,
         ).to(device)
     else:
@@ -237,6 +238,7 @@ def main():
             config.obs.obs_dim,
             config.action.actions_per_source,
             config.action.max_sources,
+            max_launches=config.action.max_launches_per_source,
             model_config=config.model,
         ).to(device)
 
@@ -265,6 +267,7 @@ def main():
                 obs_config=config.obs,
                 actions_per_source=config.action.actions_per_source,
                 max_sources=config.action.max_sources,
+                max_launches=config.action.max_launches_per_source,
                 model_config=config.model,
             )
         else:
@@ -272,6 +275,7 @@ def main():
                 config.obs.obs_dim,
                 config.action.actions_per_source,
                 config.action.max_sources,
+                max_launches=config.action.max_launches_per_source,
                 model_config=config.model,
             )
 
@@ -304,14 +308,19 @@ def main():
 
     obs_list = [env.reset() for env in envs]
 
-    # Training history for plotting
-    history = {
-        "updates": [],
-        "rewards": [],
-        "policy_loss": [],
-        "value_loss": [],
-        "entropy": [],
-    }
+    # Training history for plotting (only collected when --plot is enabled)
+    do_plot = args.plot
+    history = (
+        {
+            "updates": [],
+            "rewards": [],
+            "policy_loss": [],
+            "value_loss": [],
+            "entropy": [],
+        }
+        if do_plot
+        else None
+    )
 
     # Training loop
     total_start_time = time.time()
@@ -335,7 +344,7 @@ def main():
                 obs_tensor = torch.from_numpy(obs_vec_batch).float().to(device)
 
                 with torch.no_grad():
-                    source_logits, slot_logits, values_batch, ownership_masks = policy(obs_tensor)
+                    source_logits, slot_logits, fraction_values, values_batch, ownership_masks = policy(obs_tensor)
                 values_batch = values_batch.squeeze(-1)
 
                 actions_batch = torch.zeros(
@@ -345,6 +354,14 @@ def main():
                         config.action.max_launches_per_source,
                     ),
                     dtype=torch.long,
+                    device=device,
+                )
+                fractions_batch = torch.zeros(
+                    (
+                        config.train.num_envs,
+                        config.action.max_sources,
+                        config.action.max_launches_per_source,
+                    ),
                     device=device,
                 )
                 logprobs_batch = torch.zeros((config.train.num_envs,), device=device)
@@ -398,20 +415,22 @@ def main():
                     action_templates, source_ships = action_builder.build(
                         obs_list[i], source_planet_ids=src_indices,
                     )
-                    # 3. Sample slot actions from per-slot logits
-                    action_indices, slot_lp, _ = sample_action_sequence(
+                    # 3. Sample slot actions from per-slot logits, with continuous fractions
+                    action_indices, slot_lp, _, fracs_out = sample_action_sequence(
                         slot_logits[i],
                         action_templates,
                         source_ships,
                         max_launches=config.action.max_launches_per_source,
                         deterministic=False,
                         action_config=config.action,
+                        fractions=fraction_values[i],
                     )
                     # 4. Source-selection logprob
                     src_lp = source_selection_logprob(
                         source_logits[i], ownership_masks[i], src_indices,
                     )
                     actions_batch[i] = action_indices
+                    fractions_batch[i] = fracs_out
                     logprobs_batch[i] = src_lp + slot_lp
 
                     obs_snapshots.append(dict(obs_list[i]))
@@ -423,6 +442,7 @@ def main():
                         opponent_actions=opponent_actions_per_env[i],
                         action_templates_override=action_templates,
                         source_ships_override=source_ships,
+                        fractions_override=fracs_out,
                     )
                     # rendering_html = env._env.render(mode = "html")
                     # with open(f"./tmp/render_result/new-update-{update}-roll-{roll}-env-{i}.html", "w") as f:
@@ -447,6 +467,7 @@ def main():
                     action_templates_list=templates_snapshots,
                     source_ships_list=ships_snapshots,
                     source_indices_list=source_indices_snapshots,
+                    fractions=fractions_batch,
                 )
 
                 obs_list = next_obs_list
@@ -465,7 +486,7 @@ def main():
             )
             last_obs_tensor = torch.from_numpy(last_obs_vec).float().to(device)
             with torch.no_grad():
-                _, _, last_values, _ = policy(last_obs_tensor)
+                _, _, _, last_values, _ = policy(last_obs_tensor)
             buffer.compute_returns_and_advantages(
                 last_values.squeeze(-1), config.train.gamma, config.train.gae_lambda
             )
@@ -486,11 +507,12 @@ def main():
             writer.add_scalar("train/learning_rate", optimizer.param_groups[0]["lr"], update)
 
             # Collect history for plotting
-            history["updates"].append(update)
-            history["rewards"].append(mean_reward)
-            history["policy_loss"].append(stats["policy_loss"])
-            history["value_loss"].append(stats["value_loss"])
-            history["entropy"].append(stats["entropy"])
+            if do_plot:
+                history["updates"].append(update)
+                history["rewards"].append(mean_reward)
+                history["policy_loss"].append(stats["policy_loss"])
+                history["value_loss"].append(stats["value_loss"])
+                history["entropy"].append(stats["entropy"])
 
             train_ratio = f"{train_time/update_time*100:.2f}"
             # if update % 10 == 0 or update == start_update:
@@ -539,8 +561,8 @@ def main():
         print(f"Average per update: {_format_time(avg_time)}")
         print("-" * 60)
 
-        # Plot training curves
-        if args.plot and len(history["updates"]) > 0:
+        # Plot training curves (only if --plot flag is set)
+        if do_plot and len(history["updates"]) > 0:
             _plot_training_curves(history, log_dir, timestamp)
 
         writer.close()

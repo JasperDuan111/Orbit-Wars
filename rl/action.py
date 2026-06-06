@@ -25,18 +25,6 @@ class ActionBuilder:
         self.actions_per_source = self.config.actions_per_source
         self.max_sources = self.config.max_sources
 
-        # Pre-compute fraction lookup: maps action index → fraction (or -1.0 for None/STOP slots).
-        # This avoids repeatedly building the same frac_tensor from template lists at every call site.
-        aps = self.actions_per_source
-        fracs = [float(-1.0)] * aps
-        idx = 1
-        for _ in range(self.config.max_targets):
-            for frac in self.config.ship_fractions:
-                if idx < aps:
-                    fracs[idx] = float(frac)
-                    idx += 1
-        self._frac_array = fracs  # List[float] for fast CPU access / tensor construction
-
     def build(self, obs, source_planet_ids: Optional[Sequence[int]] = None):
         """Build action templates for source planets.
 
@@ -71,8 +59,6 @@ class ActionBuilder:
 
         max_sources = self.max_sources
         max_targets = self.config.max_targets
-        ship_fractions = self.config.ship_fractions
-        n_fractions = len(ship_fractions)
         aps = self.actions_per_source
 
         actions: List[List[Optional[ActionTemplate]]] = []
@@ -91,8 +77,6 @@ class ActionBuilder:
             sx, sy = src.x, src.y
 
             # Two-group distance sort: own planets first, then enemy/neutral.
-            # Equivalent to sort-by (-is_own, dist) but avoids per-source closure
-            # creation and complex tuple-comparison keys.
             own_distances = []
             other_distances = []
             for p in my_planets_all:
@@ -110,16 +94,11 @@ class ActionBuilder:
                 actions.append(source_actions)
                 continue
 
-            idx = 1
-            for j in range(max_targets):
-                if j >= len(ordered_targets):
-                    idx += n_fractions
-                    continue
+            # slot 0 = STOP, slots 1..max_targets = target selection (no fraction)
+            for j in range(min(max_targets, len(ordered_targets))):
                 tgt = ordered_targets[j]
                 angle = math.atan2(tgt.y - sy, tgt.x - sx)
-                for frac in ship_fractions:
-                    source_actions[idx] = ActionTemplate(src.id, angle, float(frac))
-                    idx += 1
+                source_actions[j + 1] = ActionTemplate(src.id, angle)
 
             actions.append(source_actions)
 
@@ -131,7 +110,18 @@ class ActionBuilder:
         actions: Sequence[Sequence[Optional["ActionTemplate"]]],
         source_ships: Sequence[int],
         max_launches: Optional[int] = None,
+        fractions: Optional[Sequence[Sequence[float]]] = None,
     ):
+        """Decode action indices into game moves.
+
+        Args:
+            action_indices: (max_sources, max_launches) discrete target indices.
+            actions: per-source list of ActionTemplate slots.
+            source_ships: per-source available ship counts.
+            max_launches: max launch steps per source.
+            fractions: (max_sources, max_launches) continuous fraction values in [0, 1].
+                       If None, defaults to 1.0 for all launches.
+        """
         if action_indices is None:
             return []
         if hasattr(action_indices, "tolist"):
@@ -162,7 +152,13 @@ class ActionBuilder:
                 action = source_actions[action_idx]
                 if action is None:
                     break
-                ships = _ships_to_send(remaining, action.fraction)
+                # Use continuous fraction from model output, default to 1.0
+                frac = 1.0
+                if fractions is not None and src_idx < len(fractions):
+                    src_fracs = fractions[src_idx]
+                    if step_idx < len(src_fracs):
+                        frac = float(src_fracs[step_idx])
+                ships = _ships_to_send(remaining, frac)
                 if ships <= 0:
                     break
                 moves.append([action.source_id, action.angle, ships])
@@ -177,7 +173,6 @@ class ActionBuilder:
 class ActionTemplate:
     source_id: int
     angle: float
-    fraction: float
 
 
 # ── Source selection (Gumbel top-k for training, argmax for inference) ──
@@ -297,18 +292,39 @@ def sample_action_sequence(
     max_launches: Optional[int] = None,
     deterministic: bool = False,
     action_config: Optional[ActionSpaceConfig] = None,
+    fractions: Optional[torch.Tensor] = None,
 ):
+    """Sample target actions and return action indices + logprobs.
+
+    Args:
+        logits: (S, A) per-slot target logits.
+        actions: per-source action template lists.
+        source_ships: per-source available ships.
+        max_launches: max launch steps per source.
+        deterministic: if True, use argmax instead of sampling.
+        action_config: action space config.
+        fractions: (S, L) continuous fraction tensor in [0, 1].
+                   If None, defaults to 1.0.
+
+    Returns:
+        action_indices: (S, L) long tensor.
+        logprob_sum: scalar sum of log-probs.
+        entropy_sum: scalar sum of entropies.
+        fractions_out: (S, L) fraction values used (same as input or defaults).
+    """
     device = logits.device
     config = action_config or DEFAULT_CONFIG.action
     if max_launches is None:
         max_launches = config.max_launches_per_source
-    action_indices = torch.zeros(
-        (config.max_sources, max_launches), dtype=torch.long, device=device
-    )
+
+    S = config.max_sources
+    L = max_launches
+    action_indices = torch.zeros((S, L), dtype=torch.long, device=device)
+    fractions_out = torch.ones((S, L), device=device)
     logprob_sum = torch.zeros((), device=device)
     entropy_sum = torch.zeros((), device=device)
 
-    n_src = min(config.max_sources, len(actions))
+    n_src = min(S, len(actions))
     for src_idx in range(n_src):
         remaining = int(source_ships[src_idx]) if src_idx < len(source_ships) else 0
         if remaining <= 0:
@@ -316,15 +332,14 @@ def sample_action_sequence(
         source_actions = actions[src_idx]
         n_slots = len(source_actions)
 
-        # Build mask & distribution ONCE per source: mask is static for remaining > 0.
+        # Build mask & distribution ONCE per source.
         mask = _build_source_mask(source_actions, n_slots, device)
-        # Guard against NaN from corrupted model weights (float16 underflow etc.)
         src_logits = logits[src_idx].to(torch.float32).nan_to_num(0.0)
         masked_logits = src_logits.masked_fill(mask == 0, float('-inf'))
         dist = Categorical(logits=masked_logits)
         entropy_sum = entropy_sum + dist.entropy()
 
-        for step_idx in range(max_launches):
+        for step_idx in range(L):
             if deterministic:
                 action = torch.argmax(masked_logits)
             else:
@@ -338,14 +353,19 @@ def sample_action_sequence(
             template = source_actions[action_idx]
             if template is None:
                 break
-            ships = _ships_to_send(remaining, template.fraction)
+            # Use continuous fraction from model output
+            frac = 1.0
+            if fractions is not None and src_idx < fractions.shape[0] and step_idx < fractions.shape[1]:
+                frac = float(fractions[src_idx, step_idx].item())
+            fractions_out[src_idx, step_idx] = frac
+            ships = _ships_to_send(remaining, frac)
             if ships <= 0:
                 break
             remaining -= ships
             if remaining <= 0:
                 break
 
-    return action_indices, logprob_sum, entropy_sum
+    return action_indices, logprob_sum, entropy_sum, fractions_out
 
 
 def logprob_for_action_sequence(
@@ -355,7 +375,12 @@ def logprob_for_action_sequence(
     action_indices: torch.Tensor,
     max_launches: Optional[int] = None,
     action_config: Optional[ActionSpaceConfig] = None,
+    fractions: Optional[torch.Tensor] = None,
 ):
+    """Compute log-probability and entropy for a given action sequence.
+
+    Fraction values do not contribute to logprob (treated as deterministic).
+    """
     device = logits.device
     config = action_config or DEFAULT_CONFIG.action
     if max_launches is None:
@@ -386,7 +411,6 @@ def logprob_for_action_sequence(
                 action_idx = int(action_indices[src_idx, step_idx].item())
             except (TypeError, ValueError, IndexError):
                 break
-            # Use the tensor directly — avoids an extra torch.tensor() allocation.
             logprob_sum = logprob_sum + dist.log_prob(action_indices[src_idx, step_idx])
 
             if action_idx <= 0:
@@ -394,7 +418,11 @@ def logprob_for_action_sequence(
             template = source_actions[action_idx]
             if template is None:
                 break
-            ships = _ships_to_send(remaining, template.fraction)
+            # Use continuous fraction
+            frac = 1.0
+            if fractions is not None and src_idx < fractions.shape[0] and step_idx < fractions.shape[1]:
+                frac = float(fractions[src_idx, step_idx].item())
+            ships = _ships_to_send(remaining, frac)
             if ships <= 0:
                 break
             remaining -= ships
@@ -412,19 +440,6 @@ def _ships_to_send(remaining_ships: int, fraction: float) -> int:
 
 
 # ── Batched logprob computation (PPO update) ──
-
-def _build_frac_array(action_config: ActionSpaceConfig):
-    """Pre-compute fraction lookup: action_idx → fraction (or -1.0 for None/STOP)."""
-    aps = action_config.actions_per_source
-    fracs = [float(-1.0)] * aps
-    idx = 1
-    for _ in range(action_config.max_targets):
-        for frac in action_config.ship_fractions:
-            if idx < aps:
-                fracs[idx] = float(frac)
-                idx += 1
-    return fracs
-
 
 def _compute_max_valid_idx(
     templates_list: Sequence[Sequence[Sequence[Optional[ActionTemplate]]]],
@@ -454,17 +469,19 @@ def _compute_max_valid_idx(
 def _compute_step_valid(
     action_indices: torch.Tensor,
     source_ships_list: Sequence[Sequence[int]],
-    frac_array: Sequence[float],
+    fractions: torch.Tensor,
     max_launches: int,
 ) -> torch.Tensor:
     """CPU simulation of autoregressive break logic for every (batch, source).
+
+    Args:
+        fractions: (B, S, L) continuous fraction tensor in [0, 1].
 
     Returns:
         (B, S, L) BoolTensor on CPU.  True = this launch step actually executed.
     """
     B, n_sources, L = action_indices.shape
     result = torch.zeros(B, n_sources, L, dtype=torch.bool)
-    n_fracs = len(frac_array)
 
     for b in range(B):
         for s in range(n_sources):
@@ -472,15 +489,12 @@ def _compute_step_valid(
             if remaining <= 0:
                 continue
             for l in range(L):
-                # log_prob is computed for every step whose loop body is reached,
-                # regardless of whether the action is STOP.  Mark valid first,
-                # THEN check break conditions to determine if next step executes.
                 result[b, s, l] = True
 
                 aidx = int(action_indices[b, s, l].item())
                 if aidx <= 0:
                     break
-                frac = frac_array[aidx] if aidx < n_fracs else -1.0
+                frac = float(fractions[b, s, l].item()) if fractions is not None else 1.0
                 if frac <= 0:
                     break
                 ships = max(1, min(int(remaining * frac), remaining))
@@ -501,8 +515,11 @@ def logprob_for_action_sequence_batched(
 ):
     """Batch log-probability and entropy for all samples in a single GPU pass.
 
+    Note: fraction values do NOT contribute to logprob (treated as deterministic).
+    Only target selection contributes to the policy gradient.
+
     Args:
-        slot_logits:   (B, S, A) per-slot logits.
+        slot_logits:   (B, S, A) per-slot logits (target selection only).
         max_valid_idx: (B, S)   max valid action index per source (CPU, moved to GPU).
         action_indices:(B, S, L) discrete action indices.
         step_valid:    (B, S, L) bool mask: which steps actually executed (CPU→GPU).
@@ -510,6 +527,7 @@ def logprob_for_action_sequence_batched(
     Returns:
         logprob_sum: (B,)  sum of log-probs over valid steps.
         entropy_sum: (B,)  sum of entropies over active sources.
+        source_active_count: (B,) number of active sources per sample.
     """
     B, S, A = slot_logits.shape
     device = slot_logits.device
@@ -534,7 +552,7 @@ def logprob_for_action_sequence_batched(
     L = action_indices.shape[-1]
     flat_actions = action_indices.reshape(B * S, L)
 
-    # Categorical.log_prob expects 1D (batch_shape,); compute per launch step (L ≤ 3).
+    # Categorical.log_prob expects 1D (batch_shape,); compute per launch step.
     all_logprobs = torch.zeros(B * S, L, device=device)
     for l in range(L):
         all_logprobs[:, l] = dist.log_prob(flat_actions[:, l])

@@ -6,7 +6,6 @@ from torch.amp import autocast, GradScaler
 from torch.nn.utils import clip_grad_norm_
 
 from .action import (
-    _build_frac_array,
     _compute_max_valid_idx,
     _compute_step_valid,
     logprob_for_action_sequence_batched,
@@ -26,6 +25,10 @@ class RolloutBuffer:
             dtype=torch.long,
             device=device,
         )
+        self.fractions = torch.zeros(
+            (rollout_steps, num_envs, max_sources, max_launches),
+            device=device,
+        )
         self.logprobs = torch.zeros((rollout_steps, num_envs), device=device)
         self.rewards = torch.zeros((rollout_steps, num_envs), device=device)
         self.dones = torch.zeros((rollout_steps, num_envs), device=device)
@@ -40,7 +43,7 @@ class RolloutBuffer:
 
     def add_batch(self, obs, raw_obs, actions, logprobs, rewards, dones, values,
                   action_templates_list=None, source_ships_list=None,
-                  source_indices_list=None):
+                  source_indices_list=None, fractions=None):
         if self.pos >= self.rollout_steps:
             raise RuntimeError("Rollout buffer is full.")
         self.obs[self.pos].copy_(obs)
@@ -49,6 +52,8 @@ class RolloutBuffer:
         self.rewards[self.pos].copy_(rewards)
         self.dones[self.pos].copy_(dones)
         self.values[self.pos].copy_(values)
+        if fractions is not None:
+            self.fractions[self.pos].copy_(fractions)
         for i in range(self.num_envs):
             self.raw_obs[self.pos][i] = raw_obs[i]
             if action_templates_list is not None:
@@ -74,6 +79,7 @@ class RolloutBuffer:
         indices = np.random.permutation(total)
         flat_obs = self.obs.reshape(total, -1)
         flat_actions = self.actions.reshape(total, *self.actions.shape[2:])
+        flat_fractions = self.fractions.reshape(total, *self.fractions.shape[2:])
         flat_logprobs = self.logprobs.reshape(total)
         flat_returns = self.returns.reshape(total)
         flat_advantages = self.advantages.reshape(total)
@@ -95,6 +101,7 @@ class RolloutBuffer:
                 [flat_templates[i] for i in batch_idx],
                 [flat_ships[i] for i in batch_idx],
                 [flat_source_indices[i] for i in batch_idx],
+                flat_fractions[batch_idx],
             )
 
     def clear(self):
@@ -118,7 +125,6 @@ class PPOTrainer:
         self.scaler = GradScaler("cuda") if use_amp else None
         self.action_config = action_config or DEFAULT_CONFIG.action
         self.max_launches = self.action_config.max_launches_per_source
-        self._frac_array = _build_frac_array(self.action_config)
 
     def update(self, buffer):
         advantages = buffer.advantages.reshape(-1)
@@ -135,6 +141,7 @@ class PPOTrainer:
         # Pre-compute static CPU structures for all (T*E) samples — invariant across epochs.
         total = buffer.rollout_steps * buffer.num_envs
         flat_all_actions = buffer.actions.reshape(total, *buffer.actions.shape[2:])  # (T*E, S, L)
+        flat_all_fractions = buffer.fractions.reshape(total, *buffer.fractions.shape[2:])  # (T*E, S, L)
         flat_all_templates = [
             buffer.action_templates[t][e]
             for t in range(buffer.rollout_steps) for e in range(buffer.num_envs)
@@ -149,19 +156,19 @@ class PPOTrainer:
             self.action_config.actions_per_source,
         )
         step_valid_all = _compute_step_valid(
-            flat_all_actions, flat_all_ships, self._frac_array, self.max_launches,
+            flat_all_actions, flat_all_ships, flat_all_fractions, self.max_launches,
         )
 
         for _ in range(self.epochs):
             for batch_idx, obs, actions, old_logprobs, returns, adv, raw_obs, \
-                _templates_list, _ships_list, source_indices_list in buffer.get(
+                _templates_list, _ships_list, source_indices_list, _fractions_batch in buffer.get(
                 self.batch_size
             ):
                 if self.use_amp:
                     with autocast("cuda"):
-                        source_logits, slot_logits, values, ownership_mask = self.policy(obs)
+                        source_logits, slot_logits, _fractions, values, ownership_mask = self.policy(obs)
                 else:
-                    source_logits, slot_logits, values, ownership_mask = self.policy(obs)
+                    source_logits, slot_logits, _fractions, values, ownership_mask = self.policy(obs)
                 values = values.squeeze(-1)
 
                 adv = advantages[batch_idx]

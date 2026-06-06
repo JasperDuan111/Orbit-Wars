@@ -23,6 +23,7 @@ class ActorCritic(nn.Module):
         obs_dim,
         actions_per_source,
         max_sources,
+        max_launches=3,
         hidden_sizes=None,
         dropout=None,
         model_config: ModelConfig = None,
@@ -35,8 +36,11 @@ class ActorCritic(nn.Module):
             dropout = config.dropout
         self.actions_per_source = actions_per_source
         self.max_sources = max_sources
+        self.max_launches = max_launches
         self.body = _build_mlp(obs_dim, hidden_sizes, hidden_sizes[-1], dropout)
         self.slot_policy_head = nn.Linear(hidden_sizes[-1], max_sources * actions_per_source)
+        # Continuous fraction head: outputs raw values, sigmoid applied in forward
+        self.fraction_head = nn.Linear(hidden_sizes[-1], max_sources * max_launches)
         self.value_head = nn.Linear(hidden_sizes[-1], 1)
         # Fallback: learnable, non-observation-dependent source logits (equivalent to fixed ordering)
         self.fallback_source_logits = nn.Parameter(
@@ -48,6 +52,9 @@ class ActorCritic(nn.Module):
         features = self.body(obs)
         slot_logits = self.slot_policy_head(features)
         slot_logits = slot_logits.view(B, self.max_sources, self.actions_per_source)
+        # Fraction: raw → sigmoid → [0, 1]
+        fraction_raw = self.fraction_head(features)
+        fraction_values = torch.sigmoid(fraction_raw).view(B, self.max_sources, self.max_launches)
         value = self.value_head(features)
         # MLP lacks per-planet structure: source_logits are non-spatial (zeros);
         # ActionBuilder falls back to ship-count ordering when no planet-dim source logits.
@@ -59,7 +66,8 @@ class ActorCritic(nn.Module):
         source_logits = source_logits.nan_to_num(0.0)
         slot_logits = slot_logits.nan_to_num(0.0)
         value = value.nan_to_num(0.0)
-        return source_logits, slot_logits, value, ownership_mask
+        fraction_values = fraction_values.nan_to_num(0.5)
+        return source_logits, slot_logits, fraction_values, value, ownership_mask
 
 
 # GNN + Self-Attention + Cross-Attention model
@@ -69,6 +77,7 @@ class ActorCriticGNN(nn.Module):
         obs_config: ObsConfig,
         actions_per_source: int,
         max_sources: int,
+        max_launches: int = 3,
         model_config: ModelConfig = None,
         gnn_config: GNNConfig = None,
     ):
@@ -83,6 +92,7 @@ class ActorCriticGNN(nn.Module):
         self.global_features = obs_config.global_features
         self.actions_per_source = actions_per_source
         self.max_sources = max_sources
+        self.max_launches = max_launches
 
         self.gcn_dims = list(gnn_cfg.gcn_dims)
         self.fleet_attn_dims = list(gnn_cfg.fleet_attn_dims)
@@ -131,13 +141,22 @@ class ActorCriticGNN(nn.Module):
         self.source_query = nn.Parameter(torch.randn(max_sources, self.hg) * 0.02)
         self.source_key = nn.Linear(self.hg, self.hg, bias=False)
 
-        # 6. Per-slot target+fraction head (shared across slots)
+        # 6. Per-slot target selection head (shared across slots)
         self.slot_policy_head = nn.Sequential(
             nn.Linear(self.hg, self.hg),
             nn.LayerNorm(self.hg),
             nn.GELU(),
             nn.Dropout(self.dropout),
             nn.Linear(self.hg, actions_per_source),
+        )
+
+        # 6b. Continuous fraction head (per slot, per launch step)
+        self.fraction_head = nn.Sequential(
+            nn.Linear(self.hg, self.hg // 2),
+            nn.LayerNorm(self.hg // 2),
+            nn.GELU(),
+            nn.Dropout(self.dropout),
+            nn.Linear(self.hg // 2, max_launches),
         )
 
         # 7. Value head — pools planet, fleet, and global features together.
@@ -219,7 +238,7 @@ class ActorCriticGNN(nn.Module):
         source_logits = torch.bmm(Q_src, K_src.transpose(1, 2)) / (self.hg ** 0.5)
         # source_logits: (B, max_sources, max_planets)
  
-        # -- 6. Per-slot target+fraction logits --
+        # -- 6. Per-slot target logits --
         # Soft-attend over planets per slot to get slot embedding
         # Mask to owned planets for source attention
         src_mask = ownership_mask.unsqueeze(1).float()  # (B, 1, max_planets)
@@ -230,6 +249,10 @@ class ActorCriticGNN(nn.Module):
 
         # Shared MLP over each slot embedding → (B, max_sources, actions_per_source)
         slot_logits = self.slot_policy_head(slot_embs)
+
+        # -- 6b. Continuous fraction per slot, per launch step --
+        fraction_raw = self.fraction_head(slot_embs)  # (B, max_sources, max_launches)
+        fraction_values = torch.sigmoid(fraction_raw)
 
         # -- 7. Value head (mean-pool over planets) --
         Zp_pooled = (Zp * planet_mask.unsqueeze(-1)).sum(dim=1) / (
@@ -246,4 +269,5 @@ class ActorCriticGNN(nn.Module):
         source_logits = source_logits.nan_to_num(0.0)
         slot_logits = slot_logits.nan_to_num(0.0)
         value = value.nan_to_num(0.0)
-        return source_logits, slot_logits, value, ownership_mask
+        fraction_values = fraction_values.nan_to_num(0.5)
+        return source_logits, slot_logits, fraction_values, value, ownership_mask

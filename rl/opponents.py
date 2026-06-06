@@ -70,9 +70,10 @@ class PolicyOpponent:
         )
         obs_tensor = torch.from_numpy(obs_vector).float().unsqueeze(0).to(self.device)
         with torch.no_grad():
-            source_logits, slot_logits, _, ownership_mask = self.policy(obs_tensor)
+            source_logits, slot_logits, fraction_values, _, ownership_mask = self.policy(obs_tensor)
             source_logits = source_logits.squeeze(0)
             slot_logits = slot_logits.squeeze(0)
+            fraction_values = fraction_values.squeeze(0)
             ownership_mask = ownership_mask.squeeze(0)
         # Select sources deterministically
         src_indices = select_sources(
@@ -84,19 +85,21 @@ class PolicyOpponent:
             obs, source_planet_ids=src_indices,
         )
         with torch.no_grad():
-            action_indices, _, _ = sample_action_sequence(
+            action_indices, _, _, fracs_out = sample_action_sequence(
                 slot_logits,
                 actions,
                 source_ships,
                 max_launches=self.action_config.max_launches_per_source,
                 deterministic=True,
                 action_config=self.action_config,
+                fractions=fraction_values,
             )
         return self._action_builder.decode(
             action_indices,
             actions,
             source_ships,
             max_launches=self.action_config.max_launches_per_source,
+            fractions=fracs_out,
         )
 
     @staticmethod
@@ -135,7 +138,7 @@ class PolicyOpponent:
 
             obs_tensor = torch.from_numpy(np.stack(obs_vectors)).float().to(device)
             with torch.no_grad():
-                source_logits_batch, slot_logits_batch, _, ownership_masks = policy(obs_tensor)
+                source_logits_batch, slot_logits_batch, fraction_values_batch, _, ownership_masks = policy(obs_tensor)
 
             for i, idx in enumerate(indices):
                 _, obs = opponents_with_obs[idx]
@@ -148,20 +151,22 @@ class PolicyOpponent:
                 templates, ships = first._action_builder.build(
                     obs, source_planet_ids=src_indices,
                 )
-                # Sample slot actions
-                action_indices, _, _ = sample_action_sequence(
+                # Sample slot actions with continuous fractions
+                action_indices, _, _, fracs_out = sample_action_sequence(
                     slot_logits_batch[i],
                     templates,
                     ships,
                     max_launches=max_launches,
                     deterministic=True,
                     action_config=action_config,
+                    fractions=fraction_values_batch[i],
                 )
                 results[idx] = first._action_builder.decode(
                     action_indices,
                     templates,
                     ships,
                     max_launches=max_launches,
+                    fractions=fracs_out,
                 )
 
         return results

@@ -46,12 +46,13 @@ class ObsConfig:
 class ActionSpaceConfig:
     max_sources: int = 8
     max_targets: int = 20
-    ship_fractions: Tuple[float, ...] = (0.25, 0.5, 0.75, 1.0)
     max_launches_per_source: int = 6
 
     @property
     def actions_per_source(self) -> int:
-        return 1 + self.max_targets * len(self.ship_fractions)
+        # slot 0 = STOP, slots 1..max_targets = target selection
+        # fraction is now a continuous output (0~1) from a separate model head
+        return 1 + self.max_targets
 
 
 @dataclass(frozen=True)
@@ -174,7 +175,6 @@ GLOBAL_FEATURES = DEFAULT_CONFIG.obs.global_features
 
 MAX_SOURCES = DEFAULT_CONFIG.action.max_sources
 MAX_TARGETS = DEFAULT_CONFIG.action.max_targets
-SHIP_FRACTIONS = DEFAULT_CONFIG.action.ship_fractions
 MAX_LAUNCHES_PER_SOURCE = DEFAULT_CONFIG.action.max_launches_per_source
 
 MODEL_HIDDEN_SIZES = DEFAULT_CONFIG.model.hidden_sizes

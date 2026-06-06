@@ -17,7 +17,6 @@ obs:
 action:
   max_sources: 12
   max_targets: 20
-  ship_fractions: [0.25, 0.5, 0.75, 1.0]
   max_launches_per_source: 3
 
 model:
