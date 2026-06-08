@@ -30,21 +30,13 @@ model:
     cross_attn_dims: [512, 256, 128]       # Cross-attention projection dims
 
 reward:
-  # ── Dense shaping: rate-of-change of normalized ship advantage ──
-  ship_advantage_delta_scale: 1.0
-  # ── Sparse events: planet capture / loss ──
-  territory_scale: 2.0
-  production_weight: 0.5
-  neutral_capture_bonus: 0.5         # extra multiplier for neutral captures
-  # ── Combat exchange ratio ──
-  combat_efficiency_scale: 0.3
-  # ── Idle-ship penalty ──
-  idle_penalty_scale: 0.05
-  idle_threshold: 0.5
-  # ── Terminal ──
-  terminal_win_scale: 10.0
-  terminal_lose_scale: -10.0
-  # ── Invalid-action penalty ──
+  planet_count_scale: 0.02          # +0.02 per extra planet owned per step
+  territory_scale: 3.0              # base reward per capture / loss event
+  production_weight: 0.5            # quality multiplier: 1 + prod × weight
+  neutral_capture_bonus: 2.0        # neutral capture = (1+2.0)× base = 3×
+  idle_penalty_scale: 0.1           # −0.1/step at full idle (fires from 0 %)
+  terminal_win_scale: 15.0          # asymmetric: losing hurts as much as winning helps
+  terminal_lose_scale: -15.0
   invalid_action_penalty: 0.1
 
 env:
@@ -56,17 +48,31 @@ env:
 
 train:
   seed: 42
-  num_envs: 10
-  total_updates: 2000
-  rollout_steps: 64
+
+  # ── Data scale ──
+  num_envs: 16
+  rollout_steps: 128
+  total_updates: 1500
+
+  # ── Credit assignment ──
   gamma: 0.99
   gae_lambda: 0.95
+
+  # ── PPO clipping ──
   clip_range: 0.2
-  learning_rate: 0.0002
-  ent_coef: 0.02
+
+  # ── Optimisation ──
+  learning_rate: 2.0e-4
+  max_grad_norm: 0.5
+
+  # ── Loss weights ──
+  ent_coef: 0.04
   vf_coef: 1.0
-  max_grad_norm: 1.0
+
+  # ── Training schedule ──
   batch_size: 128
   epochs: 3
+
+  # ── Checkpoint & opponent ──
   save_every: 50
-  opponent_refresh: 10
+  opponent_refresh: 5

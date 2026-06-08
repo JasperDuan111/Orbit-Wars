@@ -71,25 +71,21 @@ class ModelConfig:
 
 @dataclass
 class RewardConfig:
-    # ── Dense shaping: rate-of-change of normalized ship advantage ──
-    #     reward = scale × Δ(my/(my+enemy+1)) per step   (total ≈ ±scale over episode)
-    ship_advantage_delta_scale: float = 1.0
+    # ── Dense: planet-count advantage per step ──
+    #     reward = (my_planets − enemy_planets) × scale
+    planet_count_scale: float = 0.02
 
     # ── Sparse events: planet capture / loss ──
-    territory_scale: float = 2.0              # base weight per capture/loss
+    territory_scale: float = 3.0              # base weight per capture / loss
     production_weight: float = 0.5            # quality multiplier: 1 + prod × weight
-    neutral_capture_bonus: float = 0.5        # extra multiplier when capturing from neutral
+    neutral_capture_bonus: float = 2.0        # extra multiplier for neutral captures (3× total)
 
-    # ── Combat exchange ratio ──
-    combat_efficiency_scale: float = 0.3
+    # ── Idle-ship penalty  (fires from 0 %, no threshold) ──
+    idle_penalty_scale: float = 0.1           # −0.1 / step at full idle
 
-    # ── Idle-ship penalty ──
-    idle_penalty_scale: float = 0.05
-    idle_threshold: float = 0.5               # fraction above which penalty fires
-
-    # ── Terminal ──
-    terminal_win_scale: float = 10.0
-    terminal_lose_scale: float = -10.0
+    # ── Terminal  (asymmetric) ──
+    terminal_win_scale: float = 15.0
+    terminal_lose_scale: float = -15.0
 
     # ── Invalid-action penalty (applied by env wrapper) ──
     invalid_action_penalty: float = 0.1
@@ -107,20 +103,21 @@ class EnvConfig:
 @dataclass
 class TrainConfig:
     seed: int = 42
-    num_envs: int = 10
-    total_updates: int = 2000
-    rollout_steps: int = 64
+    num_envs: int = 16
+    rollout_steps: int = 128
+    total_updates: int = 1500
     gamma: float = 0.99
     gae_lambda: float = 0.95
     clip_range: float = 0.2
     learning_rate: float = 2e-4
-    ent_coef: float = 0.02
+    ent_coef: float = 0.04
     vf_coef: float = 1.0
-    max_grad_norm: float = 1.0
+    max_grad_norm: float = 0.5
     batch_size: int = 128
     epochs: int = 3
     save_every: int = 50
-    opponent_refresh: int = 10
+    opponent_refresh: int = 5
+    opponent_pool_capacity: int = 10
 
 
 @dataclass

@@ -247,15 +247,6 @@ def main():
 
     obs_list = [env.reset() for env in envs]
 
-    # Training history for plotting
-    history = {
-        "updates": [],
-        "rewards": [],
-        "policy_loss": [],
-        "value_loss": [],
-        "entropy": [],
-    }
-
     # Training loop
     total_start_time = time.time()
 
@@ -428,13 +419,6 @@ def main():
             writer.add_scalar("train/entropy", stats["entropy"], update)
             writer.add_scalar("train/learning_rate", optimizer.param_groups[0]["lr"], update)
 
-            # Collect history for plotting
-            history["updates"].append(update)
-            history["rewards"].append(mean_reward)
-            history["policy_loss"].append(stats["policy_loss"])
-            history["value_loss"].append(stats["value_loss"])
-            history["entropy"].append(stats["entropy"])
-
             train_ratio = f"{train_time/update_time*100:.2f}"
             # if update % 10 == 0 or update == start_update:
             # Log per-step timing
@@ -481,10 +465,6 @@ def main():
         print(f"Total time: {_format_time(total_time)}")
         print(f"Average per update: {_format_time(avg_time)}")
         print("-" * 60)
-
-        # Plot training curves
-        if args.plot and len(history["updates"]) > 0:
-            _plot_training_curves(history, log_dir, timestamp)
 
         writer.close()
         sys.stdout = logger.console

@@ -124,10 +124,6 @@ class PPOTrainer:
         advantages = buffer.advantages.reshape(-1)
         advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
         old_values = buffer.values.reshape(-1)
-        # Use raw returns directly — standard PPO practice.
-        # The value head needs to learn actual return magnitudes so that
-        # GAE deltas accurately capture state-to-state variation.
-        # Advantages get normalized; returns do not.
         flat_returns = buffer.returns.reshape(-1)
         stats = {"policy_loss": 0.0, "value_loss": 0.0, "entropy": 0.0}
         updates = 0
@@ -189,11 +185,23 @@ class PPOTrainer:
                 surr2 = torch.clamp(ratios, 1.0 - self.clip_range, 1.0 + self.clip_range) * adv
                 policy_loss = -torch.min(surr1, surr2).mean()
 
-                value_pred_clipped = old_values[batch_idx] + torch.clamp(
-                    values - old_values[batch_idx], -self.clip_range, self.clip_range
-                )
+                # ── Value loss with per-batch normalization ──
+                # Raw returns span [-30, +200]; normalizing per mini-batch
+                # keeps the optimization target at ~O(1) while keeping
+                # returns, old_values, and values in the same space so
+                # the clipping logic is consistent.
                 rets = flat_returns[batch_idx]
-                value_loss_1 = (rets - values).pow(2)
+                old_vals = old_values[batch_idx]
+                ret_mean = rets.mean()
+                ret_std = rets.std() + 1e-8
+                rets = (rets - ret_mean) / ret_std
+                old_vals = (old_vals - ret_mean) / ret_std
+                values_norm = (values - ret_mean) / ret_std
+
+                value_pred_clipped = old_vals + torch.clamp(
+                    values_norm - old_vals, -self.clip_range, self.clip_range,
+                )
+                value_loss_1 = (rets - values_norm).pow(2)
                 value_loss_2 = (rets - value_pred_clipped).pow(2)
                 value_loss = 0.5 * torch.max(value_loss_1, value_loss_2).mean()
 
