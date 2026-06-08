@@ -46,61 +46,6 @@ def _format_result(r: float) -> str:
     return f"{r:.4f}"
 
 
-def _plot_training_curves(history: dict, log_dir: str, timestamp: str):
-    """Plot training curves (reward, policy loss, value loss, entropy)."""
-    try:
-        import matplotlib.pyplot as plt
-    except ImportError:
-        print("[WARNING] matplotlib not installed.  Install it with: pip install matplotlib")
-        return
-
-    updates = history["updates"]
-
-    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
-    fig.suptitle(f"Orbit Wars PPO Training Curves ({timestamp})", fontsize=14, fontweight="bold")
-
-    # Reward
-    ax = axes[0, 0]
-    ax.plot(updates, history["rewards"], color="#2196F3", linewidth=1.0, alpha=0.9)
-    ax.set_title("Mean Reward")
-    ax.set_xlabel("Update")
-    ax.set_ylabel("Reward")
-    ax.grid(True, alpha=0.3)
-
-    # Policy Loss
-    ax = axes[0, 1]
-    ax.plot(updates, history["policy_loss"], color="#F44336", linewidth=1.0, alpha=0.9)
-    ax.set_title("Policy Loss")
-    ax.set_xlabel("Update")
-    ax.set_ylabel("Loss")
-    ax.grid(True, alpha=0.3)
-
-    # Value Loss
-    ax = axes[1, 0]
-    ax.plot(updates, history["value_loss"], color="#FF9800", linewidth=1.0, alpha=0.9)
-    ax.set_title("Value Loss")
-    ax.set_xlabel("Update")
-    ax.set_ylabel("Loss")
-    ax.grid(True, alpha=0.3)
-
-    # Entropy
-    ax = axes[1, 1]
-    ax.plot(updates, history["entropy"], color="#4CAF50", linewidth=1.0, alpha=0.9)
-    ax.set_title("Entropy")
-    ax.set_xlabel("Update")
-    ax.set_ylabel("Entropy")
-    ax.grid(True, alpha=0.3)
-
-    plt.tight_layout()
-
-    plot_path = os.path.join(log_dir, f"training_curves_{timestamp}.png")
-    fig.savefig(plot_path, dpi=150, bbox_inches="tight")
-    print(f"Training curves saved to: {plot_path}")
-
-    plt.show()
-    plt.close(fig)
-
-
 class Logger:
     """Write to both console and log file."""
     def __init__(self, log_file: str):
@@ -157,8 +102,6 @@ def main():
                         help="Save final model to this directory (auto-named as YYYYMMDD_{model_type}.pt)")
     parser.add_argument("--cleanup-checkpoints", action="store_true", default=False,
                         help="Delete checkpoint dir after saving final model")
-    parser.add_argument("--plot", action="store_true", default=False,
-                        help="Plot training curves (loss & reward) after training")
     parser.add_argument(
         "--max-launches-per-source",
         type=int,

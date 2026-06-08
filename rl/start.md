@@ -8,7 +8,7 @@
 
 - **两层层次化离散动作空间**：第一层由 GNN 学习选择发射源星球（Gumbel top-k），第二层在每个槽位上输出自回归发射序列（停止 / 向某目标发送某比例的飞船）
 - **GNN + Self-Attention + Cross-Attention 模型**：图卷积编码星球关系，自注意力编码舰队关系，交叉注意力融合两者。MLP 模型为回退选项
-- **六维归一化奖励函数**：经济优势 / 领土事件 / 战斗效率 / 闲置惩罚 / 分阶段生存 / 温和终局（±5）
+- **五维归一化奖励函数**：舰船优势变化量 / 领土事件（含中立占领加成） / 战斗效率 / 闲置惩罚 / 主导终局（±10）
 - **固定维度观测编码**：48 星球 × 11 特征 + 64 舰队 × 9 特征 + 6 全局特征 = 1110 维向量
 - **GAE 优势估计 + PPO clip loss + 价值函数裁剪**
 
@@ -25,10 +25,11 @@ rl/
 ├── obs.py                   # 观测编码：原始 dict → 固定维度 numpy 向量 (1110,)
 ├── ppo.py                   # RolloutBuffer（经验存储）+ PPOTrainer（更新逻辑）
 ├── train.py                 # 主训练入口：批量 rollout + 自对弈循环
+├── rewards.py               # 奖励函数：RewardCalculator + 辅助函数（独立于环境）
 ├── opponents.py             # 对手策略：最近星球 / 随机 / 策略网络 + 对手池
 ├── envs/
 │   ├── __init__.py
-│   └── orbit_wars_env.py    # Gym 风格环境封装（self-play + 六维奖励 + 动作校验）
+│   └── orbit_wars_env.py    # Gym 风格环境封装（self-play + 动作校验，奖励委托 rewards.py）
 └── README.md                # 简要使用说明
 ```
 
@@ -48,7 +49,7 @@ rl/
 - `ModelConfig`：模型类型（`model_type` = "mlp" 或 "gnn"）及超参（`hidden_sizes`, `dropout`, `gnn` 子配置）
 - `GNNConfig`：GNN 超参（`hg=128`, `hf=128`, `ha=64`, `num_gcn_layers=2`）
 - `TrainConfig`：PPO 训练超参数
-- `RewardConfig`：六维奖励缩放参数
+- `RewardConfig`：五维奖励缩放参数
 - `EnvConfig`：环境运行参数（`num_players`, `episode_steps`, `act_timeout`, `seed`, `debug`）
 
 **`OrbitWarsConfig.from_yaml(path)`** — 从 YAML 文件构建完整配置。
@@ -75,19 +76,18 @@ rl/
 | `save_every` | 50 | 每 N 轮保存 checkpoint |
 | `opponent_refresh` | 10 | 每 N 轮重新采样对手 |
 
-**RewardConfig 字段（六维奖励）：**
+**RewardConfig 字段（五维奖励）：**
 
 | 参数 | 默认值 | 维度 |
 |---|---|---|
-| `economic_scale` | 1.0 | ① 经济优势 |
+| `ship_advantage_delta_scale` | 1.0 | ① 舰船优势变化 |
 | `territory_scale` | 2.0 | ② 领土事件 |
-| `combat_efficiency_scale` | 0.5 | ③ 战斗效率 |
-| `idle_penalty_scale` | 0.1 | ④ 闲置惩罚 |
 | `production_weight` | 0.5 | ② 星球质量倍率 |
+| `neutral_capture_bonus` | 0.5 | ② 中立星球占领额外加成 |
+| `combat_efficiency_scale` | 0.3 | ③ 战斗效率 |
+| `idle_penalty_scale` | 0.05 | ④ 闲置惩罚 |
 | `idle_threshold` | 0.5 | ④ 闲置触发阈值 |
-| `early_game_steps` / `mid_game_steps` | 50 / 200 | ⑤ 分阶段边界 |
-| `survival_reward_early/mid/late` | 0.0 / 0.01 / 0.05 | ⑤ 分阶段生存奖励 |
-| `terminal_win_scale` / `terminal_lose_scale` | ±5.0 | ⑥ 终局 |
+| `terminal_win_scale` / `terminal_lose_scale` | ±10.0 | ⑤ 终局 |
 | `invalid_action_penalty` | 0.1 | 非法动作惩罚 |
 
 ---
@@ -343,33 +343,34 @@ tensorboard --logdir runs/OrbitWars
 **关键方法：**
 
 - **`reset()`** → `obs`
-  - 初始化跟踪状态：`_last_planet_owners`（星球归属快照）、`_last_econ_ratio`（产量比率）、`_last_my_total` / `_last_enemy_total`（总舰船数）
+  - 委托 `RewardCalculator.reset(obs, player_id)` 初始化每 episode 的跟踪状态
 
 - **`step(action_indices, opponent_actions, action_templates_override, source_ships_override)`** → `(obs, reward, done, info)`
   - 支持模板/舰船覆盖（配合训练循环中按选定源构建的模板）
   - `_sanitize_action` 过滤非法 moves
-  - 调用 `_compute_reward` 计算六维奖励
+  - 委托 `RewardCalculator.compute()` 计算五维奖励
 
-- **`_compute_reward(obs, player_id)`** — **六维归一化奖励**：
+- **`_compute_reward(obs, player_id)`** → 一行委托 `self._reward_calc.compute(obs, player_id, self._is_done())`
+
+**奖励函数（`rewards.py` 独立模块）** — **五维归一化奖励**：
 
 | 维度 | 每步范围 | 机制 |
 |------|---------|------|
-| ① 经济优势 | ±0.02 | `Δ(我方产量 / (我方+敌方产量+1)) × economic_scale` |
-| ② 领土事件 | ±1.5~12（稀疏） | 星球归属变更：`±(1 + production × weight) × territory_scale` |
-| ③ 战斗效率 | ±0.25 | `(敌方损失 / 总损失 - 0.5) × combat_scale`，有战斗时触发 |
-| ④ 闲置惩罚 | −0.05~0 | `max(0, 驻守比例 − threshold) × idle_scale` |
-| ⑤ 生存奖励 | 0~+0.05 | 早期 0 / 中期 0.01 / 后期 0.05 每步 |
-| ⑥ 终局 | ±5 | 胜利/失败（温和，不碾压过程信号） |
+| ① 舰船优势变化 | ±0.01~0.05 | `Δ(my/(my+enemy+1)) × ship_delta_scale`，奖励改善趋势 |
+| ② 领土事件 | ±2~18（稀疏） | `±(1 + prod × weight) × territory_scale`，中立占领 ×1.5 加成 |
+| ③ 战斗效率 | ±0.15 | `(敌方损失 / 总损失 − 0.5) × combat_scale`，有战斗时触发 |
+| ④ 闲置惩罚 | −0.025~0 | `max(0, 驻守比例 − threshold) × idle_scale` |
+| ⑤ 终局 | ±10 | 胜利/失败（主导信号，确保最终优化目标为取胜） |
 
 - **`_sanitize_action(action, obs, player_id)`** → `(clean_moves, invalid_count)`
   - 校验每条 move：格式正确、来源星球存在、舰船足够
   - 同星球多条 move 共享余额检查，防止重复使用资源
 
-**环境辅助函数（模块级）**：
-- `_planet_owner_map(obs)` — 返回 `{planet_id: owner}` 快照
-- `_planet_production_totals(obs, player_id)` — 返回 `(my_prod, eny_prod)`
-- `_planet_production(obs, planet_id)` — 返回指定星球的产量
-- `_idle_ship_ratio(obs, player_id)` — 返回驻守舰船 / 总舰船比例
+**`rewards.py` 公开辅助函数**：
+- `planet_owner_map(obs)` — 返回 `{planet_id: owner}` 快照
+- `planet_production_totals(obs, player_id)` — 返回 `(my_prod, eny_prod)`
+- `planet_production(obs, planet_id)` — 返回指定星球的产量
+- `idle_ship_ratio(obs, player_id)` — 返回驻守舰船 / 总舰船比例
 
 ---
 
@@ -437,7 +438,7 @@ ActionBuilder.decode()
    ↓ moves [[from_id, angle, ships], ...]
 _sanitize_action()
    ↓ verified moves → Kaggle env
-   ↓ reward (六维), done
+   ↓ reward (五维), done
 RolloutBuffer 收集 (obs, actions, logprobs, rewards, dones, values,
                      action_templates, source_ships, source_indices)
    ↓ rollout complete
@@ -453,53 +454,70 @@ OpponentPool.add(state_dict)  ← 定期加入对手池
 
 ## 6. 奖励函数设计
 
-六维归一化过程奖励，所有组件 ∈ [−1, +1] 量级，避免单一维度劫持梯度。
+五维归一化奖励函数，核心原则：**密集信号用变化量（Δ）而非绝对值来避免激励惰性策略，终端信号主导以确保最终优化目标是取胜，稀疏事件提供明确的阶段性正反馈。**
 
-### ① 经济优势（每步）
-```
-cur_econ = 我方产量 / (我方产量 + 敌方产量 + 1)
-reward   = Δ(econ_ratio) × economic_scale(1.0)
-```
-- 激励：打压敌方经济，建设己方经济
-- 用比值而非绝对值：双方总量同时增长时无虚假奖励
+### 设计哲学
 
-### ② 领土事件（事件驱动）
+```
+每步奖励 ≈ 0.01 (delta) + 0 (无事件时) − 0.01 (idle) ≈ 0
+占领中立星球 ≈ +3~8   (清晰的阶段性正信号)
+占领敌方星球 ≈ +2~6   (明确的攻防信号)
+终端胜负     ≈ ±10    (主导信号，确保 agent 以赢为目标而非刷分)
+```
+
+- **变化量优于绝对值**：舰船优势奖励 Δ而非水平值 → 不奖励"已占据优势后躺平"
+- **不设生存奖励**：每步存活奖励会训练 agent 拖延而非进取
+- **中立占领有加成**：零成本扩张是早期游戏的核心策略，应有清晰正反馈
+- **终端信号主导**：±10 远超任何单步密集信号（~0.01），agent 最终一定会优化取胜目标
+
+### ① 舰船优势变化（每步，密集）
+
+```
+ratio = my / (my + enemy + 1)
+reward = Δ(ratio) × ship_delta_scale(1.0)     [每步 ±0.01~0.05]
+```
+- 激励：做出能改善相对实力的动作（占领星球、有效攻击）
+- 不激励：已占优势后单纯维持（Δ≈0，无奖励）
+- 全 episode 累计最多 ±1，不会被密集信号淹没
+
+### ② 领土事件（事件驱动，稀疏）
+
 ```
 quality = 1 + planet.production × production_weight(0.5)
-捕获:    +quality × territory_scale(2.0)    (≈ +2~+12)
-丢失:    −quality × territory_scale(2.0)    (≈ −2~−12)
+捕获己方星球:    +quality × territory_scale(2.0)      (≈ +2~+6)
+丢失己方星球:    −quality × territory_scale(2.0)      (≈ −2~−6)
+占领中立星球:    +quality × territory_scale × 1.5     (≈ +2.25~+9)
 ```
-- 只在归属变更的步触发，稀疏但高价值信号
+- 只在归属变更的步触发，稀疏但高价值
 - 高生产力星球价值是低生产力星球的 3-6 倍
+- **中立占领 ×1.5 加成**：零成本扩张是早期游戏核心竞争力
 
 ### ③ 战斗效率（有战斗时触发）
+
 ```
 效率 = 敌方损失 / (我方损失 + 敌方损失 + ε) − 0.5     [−0.5, +0.5]
-reward = 效率 × combat_scale(0.5)                    [−0.25, +0.25]
+reward = 效率 × combat_scale(0.3)                    [−0.15, +0.15]
 ```
-- 10:1 碾压 ≈ +0.23；1:10 惨败 ≈ −0.23
+- 10:1 碾压 ≈ +0.14；1:10 惨败 ≈ −0.14
 - 只在双方总损失 > 1 时触发
+- 缩减尺度（0.5→0.3）：ship-count 估算含噪声（飞行中的舰船被视为"损失"）
 
 ### ④ 闲置惩罚（每步）
+
 ```
 idle = 驻守舰船 / 总舰船
-penalty = max(0, idle − 0.5) × idle_scale(0.1)   [−0.05, 0]
+penalty = max(0, idle − 0.5) × idle_scale(0.05)   [−0.025, 0]
 ```
-- 50% 以下不触发，避免不必要的防守惩罚
+- 50% 以下不触发：允许必要的防御性囤积
+- 缩减尺度（0.1→0.05）：进攻意愿主要由事件奖励驱动，轻量惩罚仅防极端惰性
 
-### ⑤ 分阶段生存（每步）
-```
-早期 (0-50)   : 0          ← 允许探索试错
-中期 (50-200) : 0.01/步    ← 保存实力
-后期 (200-500): 0.05/步    ← 活下来才有机会翻盘
-```
-- 后期累计可达 +15，比一次终局胜负 +5 更高 → 激励不放弃
+### ⑤ 终局
 
-### ⑥ 终局
 ```
-胜利: +5.0    失败: −5.0
+胜利: +10.0    失败: −10.0
 ```
-- 旧版 ±100 → 新版 ±5：不碾压过程信号，让中期高质量战斗的价值超过终局
+- **主导信号**：约为单步密集信号的 1000 倍，密集信号总和的 10 倍
+- 确保 agent 最终优化的目标是取胜而非最大化 shaping reward
 
 ---
 
@@ -523,8 +541,10 @@ penalty = max(0, idle − 0.5) × idle_scale(0.1)   [−0.05, 0]
 - **相对位置编码**：舰队位置相对于各源星球的偏移
 
 ### 7.4 奖励函数增强
-- **彗星过滤**：领土奖励中排除彗星归属变更（误报"丢失星球"）
-- **舰队碰撞惩罚**：发送中的舰队撞彗星被摧毁时给予信号
+- **彗星过滤**：领土奖励中排除彗星归属变更（彗星到期消失时触发"丢失星球"误报）
+- **战斗效率精确化**：利用游戏引擎实际的 combat 结算数据替代 ship-count 估算
+- **对手实力感知**：根据对手强度缩放奖励，防止对弱对手过拟合
+- **阶段自适应权重**：前期放大领土奖励（鼓励扩张），后期放大终局奖励（鼓励取胜）
 
 ### 7.5 多智能体与对手
 - **League Training**：参考 AlphaStar，维护主策略/反策略等多类池
@@ -566,7 +586,7 @@ Checkpoint 保存到 `checkpoints/ppo_orbit_wars_{update}.pt`。
 
 1. **源选择是学习化的**：GNN 通过 attention 为每个槽位学习"哪个行星最好"，替代旧版的硬编码舰船排序。MLP 模型自动回退到舰船排序。
 
-2. **奖励尺度一致性**：所有六维组件归一化到同一量级，终局信号 ±5 不碾压过程信号。避免旧版中"占一个星球 +10 但有 100 艘船的优势变更只有 +0.02"的问题。
+2. **奖励设计原则**：① 密集信号用变化量（Δ）而非绝对值 → 奖励改善趋势，不奖励惰性囤积；② 终局 ±10 是主导信号，确保 agent 最终优化取胜目标；③ 中立占领有额外加成，鼓励早期扩张；④ 不设生存奖励，避免训练出拖延策略。
 
 3. **对手池是自对弈的关键**：存储历史 checkpoint 的策略快照，形成持续增强的对抗对手。capacity=5 对抗最近 5 个 version 的自己。
 

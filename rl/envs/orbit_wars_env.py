@@ -3,8 +3,8 @@ from kaggle_environments.envs.orbit_wars.orbit_wars import Planet
 from kaggle_environments.utils import structify
 from ..action import ActionBuilder
 from ..config import ActionSpaceConfig, DEFAULT_CONFIG, EnvConfig, RewardConfig
-from ..obs import ship_totals
 from ..opponents import NearestPlanetOpponent
+from ..rewards import RewardCalculator
 
 
 def _get_field(obs, name, default=None):
@@ -35,27 +35,9 @@ class OrbitWarsSelfPlayEnv:
         self._action_builder = ActionBuilder(action_config)
         self._last_actions = None
         self._last_source_ships = None
-        # ── Reward config ──
-        self.economic_scale = reward_config.economic_scale
-        self.territory_scale = reward_config.territory_scale
-        self.combat_efficiency_scale = reward_config.combat_efficiency_scale
-        self.idle_penalty_scale = reward_config.idle_penalty_scale
-        self.production_weight = reward_config.production_weight
-        self.idle_threshold = reward_config.idle_threshold
-        self.early_game_steps = reward_config.early_game_steps
-        self.mid_game_steps = reward_config.mid_game_steps
-        self.survival_reward_early = reward_config.survival_reward_early
-        self.survival_reward_mid = reward_config.survival_reward_mid
-        self.survival_reward_late = reward_config.survival_reward_late
-        self.terminal_win_scale = reward_config.terminal_win_scale
-        self.terminal_lose_scale = reward_config.terminal_lose_scale
-        self.invalid_action_penalty = reward_config.invalid_action_penalty
+        # ── Reward calculator (stateful, per-episode tracking) ──
+        self._reward_calc = RewardCalculator(reward_config)
         self.max_launches_per_source = action_config.max_launches_per_source
-        # ── Tracking state across steps ──
-        self._last_planet_owners = None   # dict[int,int]  planet_id → owner
-        self._last_econ_ratio = None       # float  my_prod / (my_prod + eny_prod + 1)
-        self._last_my_total = None         # int  my total ships (planets + fleets)
-        self._last_enemy_total = None      # int  enemy total ships
 
         opponent = opponent or NearestPlanetOpponent()
         if not isinstance(opponent, list):
@@ -104,12 +86,7 @@ class OrbitWarsSelfPlayEnv:
             self._env.reset()
         obs = self._get_obs(self.player_index)
         player_id = _get_field(obs, "player", 0)
-        my_total, enemy_total = ship_totals(obs, player_id)
-        self._last_my_total = my_total
-        self._last_enemy_total = enemy_total
-        self._last_planet_owners = _planet_owner_map(obs)
-        my_prod, eny_prod = _planet_production_totals(obs, player_id)
-        self._last_econ_ratio = my_prod / (my_prod + eny_prod + 1.0)
+        self._reward_calc.reset(obs, player_id)
         self._last_actions, self._last_source_ships = self._action_builder.build(obs)
         return obs
 
@@ -166,85 +143,12 @@ class OrbitWarsSelfPlayEnv:
             "invalid_count": invalid_count,
         }
         if invalid_count > 0:
-            reward -= self.invalid_action_penalty * invalid_count
+            reward -= self._reward_calc.invalid_action_penalty * invalid_count
         return obs, reward, self._is_done(), info
 
     def _compute_reward(self, obs, player_id):
-        """Multi-dimension reward with dense per-step signals.
-        Returns: (my_total, enemy_total, diff, reward)
-        """
-        step = _get_field(obs, "step", 0)
-        total_steps = _get_field(obs, "episodeSteps", 500)
-        my_total, enemy_total = ship_totals(obs, player_id)
-        diff = my_total - enemy_total
-        total_ships = my_total + enemy_total + 1
-        reward = 0.0
-
-        my_prod, eny_prod = _planet_production_totals(obs, player_id)
-
-        # ── Dense rewards (every step) ──
-        # 1. Ship-count advantage: normalized to roughly [-1, +1] per step
-        ship_advantage = diff / total_ships
-        reward += ship_advantage * 0.05  # small per-step signal
-
-        # 2. Production advantage: normalized to roughly [-1, +1] per step
-        prod_total = my_prod + eny_prod + 1
-        prod_advantage = (my_prod - eny_prod) / prod_total
-        reward += prod_advantage * 0.05
-
-        # ── Delta rewards (sparse but informative) ──
-        cur_econ_ratio = my_prod / (my_prod + eny_prod + 1.0)
-        if self._last_econ_ratio is not None:
-            reward += (cur_econ_ratio - self._last_econ_ratio) * self.economic_scale
-
-        cur_owners = _planet_owner_map(obs)
-        if self._last_planet_owners is not None:
-            for pid, new_owner in cur_owners.items():
-                old_owner = self._last_planet_owners.get(pid)
-                if old_owner is not None and old_owner != new_owner:
-                    production = _planet_production(obs, pid)
-                    quality = 1.0 + production * self.production_weight
-                    if new_owner == player_id:
-                        reward += quality * self.territory_scale
-                    elif old_owner == player_id:
-                        reward -= quality * self.territory_scale
-
-        if self._last_my_total is not None and self._last_enemy_total is not None:
-            my_production_now = my_prod  # ships spawned this step
-            my_combat_loss = max(0.0, self._last_my_total + my_production_now - my_total)
-            eny_combat_loss = max(0.0, self._last_enemy_total + eny_prod - enemy_total)
-            total_loss = my_combat_loss + eny_combat_loss + 1e-8
-            efficiency = eny_combat_loss / total_loss - 0.5  # [-0.5, +0.5]
-            if my_combat_loss + eny_combat_loss > 1:
-                reward += efficiency * self.combat_efficiency_scale
-
-        idle_ratio = _idle_ship_ratio(obs, player_id)
-        if idle_ratio > self.idle_threshold:
-            reward -= (idle_ratio - self.idle_threshold) * self.idle_penalty_scale
-
-        if not self._is_done():
-            if step < self.early_game_steps:
-                reward += self.survival_reward_early
-            elif step < self.mid_game_steps:
-                reward += self.survival_reward_mid
-            else:
-                reward += self.survival_reward_late
-
-        # ── Terminal reward ──
-        # Also give a scaled survival bonus based on how long the agent survived
-        if self._is_done():
-            if diff > 0:
-                reward += self.terminal_win_scale
-            else:
-                reward += self.terminal_lose_scale
-
-        # ── Update tracking state ──
-        self._last_my_total = my_total
-        self._last_enemy_total = enemy_total
-        self._last_econ_ratio = cur_econ_ratio
-        self._last_planet_owners = cur_owners
-
-        return my_total, enemy_total, diff, reward
+        """Delegate to RewardCalculator.  Returns (my_total, enemy_total, diff, reward)."""
+        return self._reward_calc.compute(obs, player_id, self._is_done())
 
     def _get_obs(self, index):
         return self._env.state[index]["observation"]
@@ -289,41 +193,3 @@ class OrbitWarsSelfPlayEnv:
             clean.append([from_id, float(angle), ships])
 
         return clean, invalid_count
-
-
-def _parse_planets_list(obs):
-    raw = _get_field(obs, "planets", [])
-    return [Planet(*p) for p in raw]
-
-
-def _planet_owner_map(obs):
-    """Return {planet_id: owner} for all planets in observation."""
-    planets = _parse_planets_list(obs)
-    return {p.id: p.owner for p in planets}
-
-
-def _planet_production_totals(obs, player_id):
-    """Return (my_total_production, enemy_total_production)."""
-    planets = _parse_planets_list(obs)
-    my_prod = sum(p.production for p in planets if p.owner == player_id)
-    eny_prod = sum(p.production for p in planets if p.owner not in (-1, player_id))
-    return my_prod, eny_prod
-
-
-def _planet_production(obs, planet_id):
-    """Return the production rate of a specific planet."""
-    planets = _parse_planets_list(obs)
-    for p in planets:
-        if p.id == planet_id:
-            return p.production
-    return 0
-
-
-def _idle_ship_ratio(obs, player_id):
-    """Fraction of total ships that are sitting on owned planets (not in flight)."""
-    planets = _parse_planets_list(obs)
-    ships_on_planets = sum(p.ships for p in planets if p.owner == player_id)
-    my_total, _ = ship_totals(obs, player_id)
-    if my_total < 1:
-        return 0.0
-    return ships_on_planets / my_total

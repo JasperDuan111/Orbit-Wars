@@ -1,60 +1,131 @@
 """
-Orbit Wars - Nearest Planet Sniper Agent
+Orbit Wars — PPO-trained model agent.
 
-A simple agent that captures the nearest unowned planet when it has
-enough ships to guarantee the takeover.
+Pipeline:
+  Observation → encode → model.forward → select_sources → build templates → sample actions → decode → moves
 
-Strategy:
-  For each planet we own, find the closest planet we don't own.
-  If we have more ships than the target's garrison, send exactly
-  enough to capture it (garrison + 1). Otherwise, wait and accumulate.
-
-Key concepts demonstrated:
-  - Parsing the observation (planets, player ID)
-  - Computing angles with atan2 for fleet direction
-  - Sending moves as [from_planet_id, angle, num_ships]
+Usage:
+  python -m rl.main --checkpoint checkpoints/ppo_orbit_wars_500.pt
 """
 
-import math
-from kaggle_environments.envs.orbit_wars.orbit_wars import Planet
+import argparse
+import os
+import sys
+
+_project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _project_root not in sys.path:
+    sys.path.insert(0, _project_root)
+
+import torch
+
+from rl.action import ActionBuilder, sample_action_sequence, select_sources
+from rl.config import OrbitWarsConfig
+from rl.models import ActorCritic, ActorCriticGNN
+from rl.obs import encode_observation
+
+# ── Load config ──
+CONFIG = OrbitWarsConfig()
+
+# ── Device ──
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+# ── Build model ──
+if CONFIG.model.model_type == "gnn":
+    MODEL = ActorCriticGNN(
+        obs_config=CONFIG.obs,
+        actions_per_source=CONFIG.action.actions_per_source,
+        max_sources=CONFIG.action.max_sources,
+        model_config=CONFIG.model,
+    ).to(DEVICE)
+else:
+    MODEL = ActorCritic(
+        CONFIG.obs.obs_dim,
+        CONFIG.action.actions_per_source,
+        CONFIG.action.max_sources,
+        model_config=CONFIG.model,
+    ).to(DEVICE)
+
+MODEL.eval()
+
+# ── Action builder ──
+ACTION_BUILDER = ActionBuilder(CONFIG.action)
+MAX_LAUNCHES = CONFIG.action.max_launches_per_source
+
+
+def load_checkpoint(path: str):
+    """Load trained weights into MODEL. Call before using agent()."""
+    ckpt = torch.load(path, map_location=DEVICE, weights_only=True)
+    state_dict = ckpt.get("policy_state_dict", ckpt)
+    MODEL.load_state_dict(state_dict)
 
 
 def agent(obs):
-    moves = []
-    player = obs.get("player", 0) if isinstance(obs, dict) else obs.player
-    raw_planets = obs.get("planets", []) if isinstance(obs, dict) else obs.planets
+    """Kaggle-compatible entry point. Returns [[from_id, angle, ships], ...]."""
 
-    # Parse into named tuples for readable field access:
-    #   Planet(id, owner, x, y, radius, ships, production)
-    #   owner == -1 means neutral, 0-3 are player IDs
-    planets = [Planet(*p) for p in raw_planets]
-    my_planets = [p for p in planets if p.owner == player]
-    targets = [p for p in planets if p.owner != player]
+    # 1. Encode observation
+    obs_vec = encode_observation(
+        obs,
+        obs_config=CONFIG.obs,
+        game_config=CONFIG.game,
+        episode_steps=CONFIG.env.episode_steps,
+    )
+    obs_tensor = torch.from_numpy(obs_vec).float().unsqueeze(0).to(DEVICE)
 
-    if not targets:
-        return moves
+    # 2. Model forward
+    with torch.no_grad():
+        source_logits, slot_logits, _, ownership_mask = MODEL(obs_tensor)
 
-    for mine in my_planets:
-        # Find the nearest planet we don't own
-        nearest = None
-        min_dist = float("inf")
-        for t in targets:
-            dist = math.sqrt((mine.x - t.x) ** 2 + (mine.y - t.y) ** 2)
-            if dist < min_dist:
-                min_dist = dist
-                nearest = t
+    source_logits = source_logits.squeeze(0)
+    slot_logits = slot_logits.squeeze(0)
+    ownership_mask = ownership_mask.squeeze(0)
 
-        if nearest is None:
-            continue
+    # 3. Select source planets
+    src_indices = select_sources(
+        source_logits, ownership_mask,
+        CONFIG.action.max_sources, deterministic=True,
+    )
 
-        # We need to send more ships than the target has to capture it.
-        # Exactly target_ships + 1 guarantees the takeover.
-        ships_needed = nearest.ships + 1
+    # 4. Build action templates
+    templates, source_ships = ACTION_BUILDER.build(obs, source_planet_ids=src_indices)
 
-        # Only launch if we can afford it — otherwise keep accumulating
-        if mine.ships >= ships_needed:
-            # atan2(dy, dx) gives the angle from our planet to the target
-            angle = math.atan2(nearest.y - mine.y, nearest.x - mine.x)
-            moves.append([mine.id, angle, ships_needed])
+    # 5. Sample discrete actions
+    action_indices, _, _ = sample_action_sequence(
+        slot_logits, templates, source_ships,
+        max_launches=MAX_LAUNCHES, deterministic=True, action_config=CONFIG.action,
+    )
 
-    return moves
+    # 6. Decode to moves
+    return ACTION_BUILDER.decode(action_indices, templates, source_ships, max_launches=MAX_LAUNCHES)
+
+
+# ── CLI ──
+
+def main():
+    parser = argparse.ArgumentParser(description="Run the PPO agent locally.")
+    parser.add_argument("--checkpoint", type=str, required=True)
+    parser.add_argument("--opponent", type=str, default="random", choices=["random", "nearest"])
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--render", action="store_true")
+    args = parser.parse_args()
+
+    load_checkpoint(args.checkpoint)
+
+    from kaggle_environments import make
+
+    env = make("orbit_wars", configuration={"seed": args.seed, "episodeSteps": 500}, debug=True)
+    opponent = "random" if args.opponent == "random" else __file__
+    env.run([agent, opponent])
+
+    for i, state in enumerate(env.steps[-1]):
+        print(f"Player {i}: reward={state.reward}, status={state.status}")
+
+    if args.render:
+        html = env.render(mode="html")
+        path = os.path.join(_project_root, "replay.html")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(html)
+        print(f"Replay saved to: {path}")
+
+
+if __name__ == "__main__":
+    main()

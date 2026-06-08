@@ -71,24 +71,27 @@ class ModelConfig:
 
 @dataclass
 class RewardConfig:
-    economic_scale: float = 1.0          # production-ratio delta weight
-    territory_scale: float = 2.0         # planet-capture event base weight
-    combat_efficiency_scale: float = 0.5 # kill-death exchange-ratio weight
-    idle_penalty_scale: float = 0.1      # idle-ships-on-planets penalty
+    # ── Dense shaping: rate-of-change of normalized ship advantage ──
+    #     reward = scale × Δ(my/(my+enemy+1)) per step   (total ≈ ±scale over episode)
+    ship_advantage_delta_scale: float = 1.0
 
-    production_weight: float = 0.5       # multiplier: 1 + prod × weight
+    # ── Sparse events: planet capture / loss ──
+    territory_scale: float = 2.0              # base weight per capture/loss
+    production_weight: float = 0.5            # quality multiplier: 1 + prod × weight
+    neutral_capture_bonus: float = 0.5        # extra multiplier when capturing from neutral
 
-    idle_threshold: float = 0.5          # fraction above which idle penalty fires
+    # ── Combat exchange ratio ──
+    combat_efficiency_scale: float = 0.3
 
-    early_game_steps: int = 50
-    mid_game_steps: int = 200
-    survival_reward_early: float = 0.0
-    survival_reward_mid: float = 0.01
-    survival_reward_late: float = 0.05
+    # ── Idle-ship penalty ──
+    idle_penalty_scale: float = 0.05
+    idle_threshold: float = 0.5               # fraction above which penalty fires
 
-    terminal_win_scale: float = 5.0
-    terminal_lose_scale: float = -5.0
+    # ── Terminal ──
+    terminal_win_scale: float = 10.0
+    terminal_lose_scale: float = -10.0
 
+    # ── Invalid-action penalty (applied by env wrapper) ──
     invalid_action_penalty: float = 0.1
 
 
@@ -107,7 +110,7 @@ class TrainConfig:
     num_envs: int = 10
     total_updates: int = 2000
     rollout_steps: int = 64
-    gamma: float = 0.999
+    gamma: float = 0.99
     gae_lambda: float = 0.95
     clip_range: float = 0.2
     learning_rate: float = 2e-4

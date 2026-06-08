@@ -17,7 +17,7 @@ obs:
 action:
   max_sources: 12
   max_targets: 20
-  ship_fractions: [0.25, 0.5, 0.75, 1.0]
+  ship_fractions: [0.2, 0.4, 0.6, 0.8, 1.0]
   max_launches_per_source: 3
 
 model:
@@ -30,19 +30,21 @@ model:
     cross_attn_dims: [512, 256, 128]       # Cross-attention projection dims
 
 reward:
-  economic_scale: 1.0
-  territory_scale: 2.0       
-  combat_efficiency_scale: 0.5
-  idle_penalty_scale: 0.1        
-  production_weight: 0.5          
-  idle_threshold: 0.5             
-  early_game_steps: 50
-  mid_game_steps: 200
-  survival_reward_early: 0.0
-  survival_reward_mid: 0.01
-  survival_reward_late: 0.05
-  terminal_win_scale: 5.0
-  terminal_lose_scale: -5.0
+  # ── Dense shaping: rate-of-change of normalized ship advantage ──
+  ship_advantage_delta_scale: 1.0
+  # ── Sparse events: planet capture / loss ──
+  territory_scale: 2.0
+  production_weight: 0.5
+  neutral_capture_bonus: 0.5         # extra multiplier for neutral captures
+  # ── Combat exchange ratio ──
+  combat_efficiency_scale: 0.3
+  # ── Idle-ship penalty ──
+  idle_penalty_scale: 0.05
+  idle_threshold: 0.5
+  # ── Terminal ──
+  terminal_win_scale: 10.0
+  terminal_lose_scale: -10.0
+  # ── Invalid-action penalty ──
   invalid_action_penalty: 0.1
 
 env:
@@ -57,7 +59,7 @@ train:
   num_envs: 10
   total_updates: 2000
   rollout_steps: 64
-  gamma: 0.999
+  gamma: 0.99
   gae_lambda: 0.95
   clip_range: 0.2
   learning_rate: 0.0002
