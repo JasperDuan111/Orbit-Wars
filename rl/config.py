@@ -73,7 +73,7 @@ class ModelConfig:
 class RewardConfig:
     # ── Dense: planet-count advantage per step ──
     #     reward = (my_planets − enemy_planets) × scale
-    planet_count_scale: float = 0.02
+    planet_count_scale: float = 0.03
 
     # ── Sparse events: planet capture / loss ──
     territory_scale: float = 3.0              # base weight per capture / loss
@@ -81,11 +81,14 @@ class RewardConfig:
     neutral_capture_bonus: float = 2.0        # extra multiplier for neutral captures (3× total)
 
     # ── Idle-ship penalty  (fires from 0 %, no threshold) ──
-    idle_penalty_scale: float = 0.1           # −0.1 / step at full idle
+    idle_penalty_scale: float = 0.15          # −0.15 / step at full idle
 
     # ── Terminal  (asymmetric) ──
     terminal_win_scale: float = 15.0
     terminal_lose_scale: float = -15.0
+
+    # ── Launch bonus: small reward per fleet launch (applied in env.step) ──
+    launch_bonus_scale: float = 0.03           # +0.03 per valid launch; breaks STOP deadlock
 
     # ── Invalid-action penalty (applied by env wrapper) ──
     invalid_action_penalty: float = 0.1
@@ -103,21 +106,23 @@ class EnvConfig:
 @dataclass
 class TrainConfig:
     seed: int = 42
-    num_envs: int = 16
-    rollout_steps: int = 128
-    total_updates: int = 1500
+    num_envs: int = 10
+    rollout_steps: int = 64
+    total_updates: int = 2000
     gamma: float = 0.99
     gae_lambda: float = 0.95
-    clip_range: float = 0.2
+    clip_range: float = 0.3
     learning_rate: float = 2e-4
-    ent_coef: float = 0.04
+    ent_coef: float = 0.05
     vf_coef: float = 1.0
+    value_reg: float = 0.01
     max_grad_norm: float = 0.5
     batch_size: int = 128
     epochs: int = 3
-    save_every: int = 50
-    opponent_refresh: int = 5
+    save_every: int = 20
+    opponent_refresh: int = 3
     opponent_pool_capacity: int = 10
+    opponent_rule_prob: float = 0.3
 
 
 @dataclass

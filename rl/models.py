@@ -38,6 +38,12 @@ class ActorCritic(nn.Module):
         self.body = _build_mlp(obs_dim, hidden_sizes, hidden_sizes[-1], dropout)
         self.slot_policy_head = nn.Linear(hidden_sizes[-1], max_sources * actions_per_source)
         self.value_head = nn.Linear(hidden_sizes[-1], 1)
+        # Bias STOP action (index 0) negative so the model defaults to
+        # launching rather than idling — critical for breaking the initial
+        # deadlock where random attacks never succeed and STOP looks optimal.
+        with torch.no_grad():
+            for s in range(max_sources):
+                self.slot_policy_head.bias[s * actions_per_source] = -2.0
         # Fallback: learnable, non-observation-dependent source logits (equivalent to fixed ordering)
         self.fallback_source_logits = nn.Parameter(
             torch.zeros(max_sources, 1)
@@ -69,6 +75,7 @@ class ActorCriticGNN(nn.Module):
         obs_config: ObsConfig,
         actions_per_source: int,
         max_sources: int,
+        n_fractions: int = 5,
         model_config: ModelConfig = None,
         gnn_config: GNNConfig = None,
     ):
@@ -131,14 +138,23 @@ class ActorCriticGNN(nn.Module):
         self.source_query = nn.Parameter(torch.randn(max_sources, self.hg) * 0.02)
         self.source_key = nn.Linear(self.hg, self.hg, bias=False)
 
-        # 6. Per-slot target+fraction head (shared across slots)
-        self.slot_policy_head = nn.Sequential(
-            nn.Linear(self.hg, self.hg),
+        # 5b. Per-slot target scoring (separate from source — avoids
+        #      autograd graph conflict from multiple log_softmax calls)
+        self.target_query = nn.Parameter(torch.randn(max_sources, self.hg) * 0.02)
+
+        # 6. Two-step action heads: STOP (independent) + fraction (target-dependent)
+        self.stop_head = nn.Linear(self.hg, 1)
+        with torch.no_grad():
+            self.stop_head.bias[0] = -1.0  # bias toward launching
+
+        self.fraction_head = nn.Sequential(
+            nn.Linear(self.hg * 2, self.hg),
             nn.LayerNorm(self.hg),
             nn.GELU(),
             nn.Dropout(self.dropout),
-            nn.Linear(self.hg, actions_per_source),
+            nn.Linear(self.hg, n_fractions),
         )
+        self.n_fractions = n_fractions
 
         # 7. Value head — pools planet, fleet, and global features together.
         # Fleet features are mean-pooled (masked), concatenated with planet
@@ -148,7 +164,7 @@ class ActorCriticGNN(nn.Module):
             nn.Linear(value_input_dim, self.hg),
             nn.LayerNorm(self.hg),
             nn.GELU(),
-            nn.Dropout(self.dropout),
+            nn.Dropout(0.3),                         # heavier dropout → prevents overfitting
             nn.Linear(self.hg, self.hg // 2),
             nn.LayerNorm(self.hg // 2),
             nn.GELU(),
@@ -217,19 +233,22 @@ class ActorCriticGNN(nn.Module):
         Q_src = self.source_query.unsqueeze(0).expand(B, -1, -1)  # (B, max_sources, hg)
         K_src = self.source_key(Zp)  # (B, max_planets, hg)
         source_logits = torch.bmm(Q_src, K_src.transpose(1, 2)) / (self.hg ** 0.5)
-        # source_logits: (B, max_sources, max_planets)
+
+        # Target scores — independent dot-product attention with separate query
+        Q_tgt = self.target_query.unsqueeze(0).expand(B, -1, -1)  # (B, S, hg)
+        target_scores = torch.bmm(Q_tgt, Zp.transpose(1, 2)) / (self.hg ** 0.5)
+        # target_scores: (B, max_sources, max_planets)
  
-        # -- 6. Per-slot target+fraction logits --
-        # Soft-attend over planets per slot to get slot embedding
-        # Mask to owned planets for source attention
+        # -- 6. Slot embeddings + STOP head --
         src_mask = ownership_mask.unsqueeze(1).float()  # (B, 1, max_planets)
         src_attn = torch.softmax(
             source_logits.masked_fill(src_mask == 0, float('-inf')), dim=-1
         ).nan_to_num(0)  # (B, max_sources, max_planets)
         slot_embs = torch.bmm(src_attn, Zp)  # (B, max_sources, hg)
+        stop_logits = self.stop_head(slot_embs)  # (B, max_sources, 1)
 
-        # Shared MLP over each slot embedding → (B, max_sources, actions_per_source)
-        slot_logits = self.slot_policy_head(slot_embs)
+        # Fraction head is called per (source, chosen_target) later:
+        #   frac_logits = fraction_head(cat([slot_embs[s], Zp[target_idx]]))
 
         # -- 7. Value head (mean-pool over planets) --
         Zp_pooled = (Zp * planet_mask.unsqueeze(-1)).sum(dim=1) / (
@@ -238,12 +257,25 @@ class ActorCriticGNN(nn.Module):
         Zf_pooled = (Zf * fleet_mask.unsqueeze(-1)).sum(dim=1) / (
             fleet_mask.sum(dim=1, keepdim=True) + 1e-8
         )  # (B, hf)
-        value_input = torch.cat([Zp_pooled, Zf_pooled, global_feat], dim=-1)  # (B, hg+hf+global)
+        value_input = torch.cat([Zp_pooled, Zf_pooled, global_feat], dim=-1)
         value = self.value_head(value_input)
 
-        # NaN guard: corrupted weights can produce NaN in any head output.
-        # Intercept here before NaN leaks into logprobs, value loss, and GAE.
+        # -- 8. Pre-compute all (source, target) fraction logits in one pass --
+        #     pair_inputs: (B, S, N, 2*hg)  →  fraction_head  →  (B, S, N, n_fractions)
+        S = slot_embs.shape[1]; N = Zp.shape[1]; hg = slot_embs.shape[2]
+        # Sanitise before building pair_inputs to prevent NaN in fraction logits
+        slot_embs = slot_embs.nan_to_num(0.0)
+        Zp = Zp.nan_to_num(0.0)
+        pair_inputs = torch.cat([
+            slot_embs.unsqueeze(2).expand(-1, -1, N, -1),
+            Zp.unsqueeze(1).expand(-1, S, -1, -1),
+        ], dim=-1)                                                           # (B, S, N, 2*hg)
+        frac_logits_all = self.fraction_head(pair_inputs)                    # (B, S, N, n_frac)
+
+        # NaN guard
         source_logits = source_logits.nan_to_num(0.0)
-        slot_logits = slot_logits.nan_to_num(0.0)
+        target_scores = target_scores.nan_to_num(0.0)
+        stop_logits = stop_logits.nan_to_num(0.0)
+        frac_logits_all = frac_logits_all.nan_to_num(0.0)
         value = value.nan_to_num(0.0)
-        return source_logits, slot_logits, value, ownership_mask
+        return source_logits, target_scores, stop_logits, frac_logits_all, value, ownership_mask

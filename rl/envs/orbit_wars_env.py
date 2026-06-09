@@ -87,33 +87,21 @@ class OrbitWarsSelfPlayEnv:
         obs = self._get_obs(self.player_index)
         player_id = _get_field(obs, "player", 0)
         self._reward_calc.reset(obs, player_id)
-        self._last_actions, self._last_source_ships = self._action_builder.build(obs)
+        self._last_actions = None
+        self._last_source_ships = None
         return obs
 
-    def step(self, action_indices, opponent_actions=None,
-             action_templates_override=None, source_ships_override=None):
+    def step(self, opponent_actions=None, my_action_override=None):
         """Step the environment.
 
         Args:
-            action_indices: Discrete action indices for the main agent.
             opponent_actions: Optional dict mapping opp_idx_in_list -> action_list.
-                When provided, skips calling opponent.act() individually and
-                uses the pre-computed actions (enables batched GPU inference).
-            action_templates_override: Optional — use these templates instead of
-                stored _last_actions (for learned source selection).
-            source_ships_override: Optional — use these ships instead of
-                stored _last_source_ships.
+            my_action_override: Pre-decoded moves list.
         """
         obs = self._get_obs(self.player_index)
         player_id = _get_field(obs, "player", 0)
-        templates = action_templates_override if action_templates_override is not None else self._last_actions
-        ships = source_ships_override if source_ships_override is not None else self._last_source_ships
-        my_action = self._action_builder.decode(
-            action_indices,
-            templates,
-            ships,
-            self.max_launches_per_source,
-        )
+        my_action = my_action_override if my_action_override is not None else []
+        my_action = my_action or []
         my_action, invalid_count = self._sanitize_action(my_action, obs, player_id)
 
         actions = [None] * self.num_players
@@ -135,7 +123,6 @@ class OrbitWarsSelfPlayEnv:
         obs = self._get_obs(self.player_index)
         my_total, enemy_total, diff, reward = self._compute_reward(obs, player_id)
 
-        self._last_actions, self._last_source_ships = self._action_builder.build(obs)
         info = {
             "my_total": my_total,
             "enemy_total": enemy_total,
@@ -144,6 +131,8 @@ class OrbitWarsSelfPlayEnv:
         }
         if invalid_count > 0:
             reward -= self._reward_calc.invalid_action_penalty * invalid_count
+        # Small bonus per valid launch — breaks the STOP deadlock early in training.
+        reward += self._reward_calc.launch_bonus_scale * len(my_action)
         return obs, reward, self._is_done(), info
 
     def _compute_reward(self, obs, player_id):

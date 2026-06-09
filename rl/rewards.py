@@ -117,6 +117,7 @@ class RewardCalculator:
         self.idle_penalty_scale: float = config.idle_penalty_scale
         self.terminal_win_scale: float = config.terminal_win_scale
         self.terminal_lose_scale: float = config.terminal_lose_scale
+        self.launch_bonus_scale: float = config.launch_bonus_scale
         self.invalid_action_penalty: float = config.invalid_action_penalty
 
         # ── Per-episode tracking ──

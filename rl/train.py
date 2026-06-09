@@ -12,7 +12,7 @@ from torch.utils.tensorboard import SummaryWriter
 
 from kaggle_environments.utils import Struct
 
-from .action import (ActionBuilder, sample_action_sequence,
+from .action import (ActionBuilder, sample_action_discrete,
                         select_sources, source_selection_logprob)
 from .config import OrbitWarsConfig
 from .envs.orbit_wars_env import OrbitWarsSelfPlayEnv
@@ -125,8 +125,6 @@ def main():
     device = args.device
     if device is None:
         device = "cuda" if torch.cuda.is_available() else "cpu"
-    use_amp = device == "cuda"
-
     if device == "cuda":
         torch.backends.cudnn.benchmark = True
 
@@ -143,7 +141,6 @@ def main():
     print(f"Log file: {log_file}")
     print(f"Model type: {args.model_type}")
     print(f"Device: {device}")
-    print(f"AMP: {use_amp}")
     print(f"Config: total_updates={config.train.total_updates}, "
           f"num_envs={config.train.num_envs}, "
           f"rollout_steps={config.train.rollout_steps}")
@@ -173,6 +170,7 @@ def main():
             obs_config=config.obs,
             actions_per_source=config.action.actions_per_source,
             max_sources=config.action.max_sources,
+            n_fractions=len(config.action.ship_fractions),
             model_config=config.model,
         ).to(device)
     else:
@@ -191,7 +189,7 @@ def main():
 
     optimizer = torch.optim.Adam(policy.parameters(), lr=config.train.learning_rate)
     trainer = PPOTrainer(policy, optimizer, config.train, device,
-                         action_config=config.action, use_amp=use_amp)
+                         action_config=config.action)
     buffer = RolloutBuffer(
         config.train.rollout_steps,
         config.train.num_envs,
@@ -208,6 +206,7 @@ def main():
                 obs_config=config.obs,
                 actions_per_source=config.action.actions_per_source,
                 max_sources=config.action.max_sources,
+                n_fractions=len(config.action.ship_fractions),
                 model_config=config.model,
             )
         else:
@@ -220,7 +219,7 @@ def main():
 
     pool = OpponentPool(
         _make_policy,
-        capacity=5,
+        capacity=config.train.opponent_pool_capacity,
         device=device,
         action_config=config.action,
         obs_config=config.obs,
@@ -243,7 +242,7 @@ def main():
             print("  Old-format checkpoint — only policy restored.  Starting at update 1")
 
     for env in envs:
-        env.set_opponent(pool.sample())
+        env.set_opponent(pool.sample(rule_prob=config.train.opponent_rule_prob))
 
     obs_list = [env.reset() for env in envs]
 
@@ -269,7 +268,8 @@ def main():
                 obs_tensor = torch.from_numpy(obs_vec_batch).float().to(device)
 
                 with torch.no_grad():
-                    source_logits, slot_logits, values_batch, ownership_masks = policy(obs_tensor)
+                    out = policy(obs_tensor)
+                    source_logits, target_scores, stop_logits, frac_logits_all, values_batch, ownership_masks = out
                 values_batch = values_batch.squeeze(-1)
 
                 actions_batch = torch.zeros(
@@ -277,6 +277,7 @@ def main():
                         config.train.num_envs,
                         config.action.max_sources,
                         config.action.max_launches_per_source,
+                        2,
                     ),
                     dtype=torch.long,
                     device=device,
@@ -316,30 +317,44 @@ def main():
                 rewards = torch.zeros((config.train.num_envs,), device=device)
                 dones = torch.zeros((config.train.num_envs,), device=device)
                 obs_snapshots = []
-                templates_snapshots = []
+                valid_targets_snapshots = []
                 ships_snapshots = []
                 source_indices_snapshots = []
 
                 action_builder = ActionBuilder(config.action)
 
                 for i, env in enumerate(envs):
-                    # 1. Select source planets from learned scores
+                    # 1. Planet metadata — unified obs indexing
+                    planets, my_idx, non_my_idx, player_id = \
+                        action_builder.get_planet_data(obs_list[i])
+
+                    # 2. Select source planets
                     src_indices = select_sources(
                         source_logits[i], ownership_masks[i],
                         config.action.max_sources, deterministic=False,
                     )
-                    # 2. Build action templates with selected sources
-                    action_templates, source_ships = action_builder.build(
-                        obs_list[i], source_planet_ids=src_indices,
-                    )
-                    # 3. Sample slot actions from per-slot logits
-                    action_indices, slot_lp, _ = sample_action_sequence(
-                        slot_logits[i],
-                        action_templates,
-                        source_ships,
+                    if src_indices is not None:
+                        ordered_sources = [int(idx.item()) for idx in src_indices]
+                    else:
+                        ordered_sources = my_idx[:config.action.max_sources]
+                    ordered_sources = ordered_sources[:config.action.max_sources]
+
+                    src_ship_list = [
+                        planets[si].ships if si < len(planets)
+                        and planets[si].owner == player_id else 0
+                        for si in ordered_sources
+                    ]
+
+                    # 3. Two-step sampling: target → fraction
+                    action_indices, slot_lp, _ = sample_action_discrete(
+                        target_scores=target_scores[i],
+                        stop_logits=stop_logits[i],
+                        frac_logits_all=frac_logits_all[i],
+                        valid_targets=non_my_idx,
+                        source_ships=src_ship_list,
                         max_launches=config.action.max_launches_per_source,
                         deterministic=False,
-                        action_config=config.action,
+                        ship_fractions=config.action.ship_fractions,
                     )
                     # 4. Source-selection logprob
                     src_lp = source_selection_logprob(
@@ -348,24 +363,27 @@ def main():
                     actions_batch[i] = action_indices
                     logprobs_batch[i] = src_lp + slot_lp
 
-                    obs_snapshots.append(dict(obs_list[i]))
-                    templates_snapshots.append(action_templates)
-                    ships_snapshots.append(source_ships)
-                    source_indices_snapshots.append(src_indices)
-                    next_obs, reward, done, info = env.step(
-                        action_indices,
-                        opponent_actions=opponent_actions_per_env[i],
-                        action_templates_override=action_templates,
-                        source_ships_override=source_ships,
+                    # 5. Decode to moves
+                    my_moves = action_builder.decode_all(
+                        planets, action_indices,
+                        ordered_sources, src_ship_list, non_my_idx,
                     )
-                    # rendering_html = env._env.render(mode = "html")
-                    # with open(f"./tmp/render_result/new-update-{update}-roll-{roll}-env-{i}.html", "w") as f:
-                    #     f.write(rendering_html)
+
+                    obs_snapshots.append(dict(obs_list[i]))
+                    valid_targets_snapshots.append(non_my_idx)
+                    ships_snapshots.append(src_ship_list)
+                    source_indices_snapshots.append(src_indices)
+
+                    # 6. Step env
+                    next_obs, reward, done, _info = env.step(
+                        opponent_actions=opponent_actions_per_env[i],
+                        my_action_override=my_moves,
+                    )
                     rewards[i] = reward
                     dones[i] = float(done)
 
                     if done:
-                        env.set_opponent(pool.sample())
+                        env.set_opponent(pool.sample(rule_prob=config.train.opponent_rule_prob))
                         next_obs = env.reset()
 
                     next_obs_list.append(next_obs)
@@ -378,7 +396,7 @@ def main():
                     rewards,
                     dones,
                     values_batch,
-                    action_templates_list=templates_snapshots,
+                    valid_targets_list=valid_targets_snapshots,
                     source_ships_list=ships_snapshots,
                     source_indices_list=source_indices_snapshots,
                 )
@@ -399,7 +417,7 @@ def main():
             )
             last_obs_tensor = torch.from_numpy(last_obs_vec).float().to(device)
             with torch.no_grad():
-                _, _, last_values, _ = policy(last_obs_tensor)
+                _, _, _, _, last_values, _ = policy(last_obs_tensor)
             buffer.compute_returns_and_advantages(
                 last_values.squeeze(-1), config.train.gamma, config.train.gae_lambda
             )
@@ -452,7 +470,7 @@ def main():
 
             if update % config.train.opponent_refresh == 0:
                 for env in envs:
-                    env.set_opponent(pool.sample())
+                    env.set_opponent(pool.sample(rule_prob=config.train.opponent_rule_prob))
 
     finally:
         total_time = time.time() - total_start_time

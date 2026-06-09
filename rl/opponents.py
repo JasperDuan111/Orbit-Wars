@@ -5,8 +5,8 @@ from typing import Optional
 
 import numpy as np
 import torch
-from kaggle_environments.envs.orbit_wars.orbit_wars import Planet
-from .action import (ActionBuilder, sample_action_sequence,
+from kaggle_environments.envs.orbit_wars.orbit_wars import CENTER, Planet, ROTATION_RADIUS_LIMIT
+from .action import (ActionBuilder, sample_action_discrete,
                         select_sources, source_selection_logprob)
 from .config import ActionSpaceConfig, DEFAULT_CONFIG, GameConfig, ObsConfig
 from .obs import encode_observation
@@ -44,7 +44,41 @@ class NearestPlanetOpponent:
 
 class RandomOpponent:
     def act(self, obs):
-        return []
+        moves = []
+        player = obs.get("player", 0)
+        planets = [Planet(*p) for p in obs.get("planets", [])]
+        for p in planets:
+            if p.owner == player and p.ships > 0:
+                angle = random.uniform(0, 2 * math.pi)
+                ships = p.ships // 2
+                if ships >= 20:
+                    moves.append([p.id, angle, ships])
+        return moves
+    
+class RuleBasedStarter:
+    """Simple scripted opponent that targets static planets first."""
+    def act(self, obs):
+        from kaggle_environments.envs.orbit_wars.orbit_wars import ROTATION_RADIUS_LIMIT, CENTER
+        moves = []
+        player_id = _get_field(obs, "player", 0)
+        planets = [Planet(*p) for p in _get_field(obs, "planets", [])]
+
+        static_targets = [p for p in planets
+                         if math.hypot(p.x - CENTER, p.y - CENTER) + p.radius >= ROTATION_RADIUS_LIMIT
+                         and p.owner != player_id]
+        kids = [p for p in planets if p.owner == player_id]
+        for mp in kids:
+            if mp.ships <= 10: continue
+            closest = None; best_d = float('inf')
+            for t in static_targets:
+                d = math.hypot(mp.x - t.x, mp.y - t.y)
+                if d < best_d: best_d = d; closest = t
+            if closest:
+                ships = min(mp.ships // 2, closest.ships + 30)
+                if ships > 10:
+                    angle = math.atan2(closest.y - mp.y, closest.x - mp.x)
+                    moves.append([mp.id, angle, ships])
+        return moves
 
 
 class PolicyOpponent:
@@ -70,43 +104,33 @@ class PolicyOpponent:
         )
         obs_tensor = torch.from_numpy(obs_vector).float().unsqueeze(0).to(self.device)
         with torch.no_grad():
-            source_logits, slot_logits, _, ownership_mask = self.policy(obs_tensor)
-            source_logits = source_logits.squeeze(0)
-            slot_logits = slot_logits.squeeze(0)
-            ownership_mask = ownership_mask.squeeze(0)
-        # Select sources deterministically
+            sg, tgt, stop, frac, _, omask = self.policy(obs_tensor)
+            sg = sg.squeeze(0); tgt = tgt.squeeze(0); stop = stop.squeeze(0)
+            frac = frac.squeeze(0); omask = omask.squeeze(0)
+
         src_indices = select_sources(
-            source_logits, ownership_mask,
-            self.action_config.max_sources, deterministic=True,
+            sg, omask, self.action_config.max_sources, deterministic=True,
         )
-        # Build templates with selected sources
-        actions, source_ships = self._action_builder.build(
-            obs, source_planet_ids=src_indices,
-        )
-        with torch.no_grad():
-            action_indices, _, _ = sample_action_sequence(
-                slot_logits,
-                actions,
-                source_ships,
-                max_launches=self.action_config.max_launches_per_source,
-                deterministic=True,
-                action_config=self.action_config,
-            )
-        return self._action_builder.decode(
-            action_indices,
-            actions,
-            source_ships,
+        planets, my_idx, non_my_idx, _ = self._action_builder.get_planet_data(obs)
+        if src_indices is not None:
+            ordered = [int(idx.item()) for idx in src_indices]
+        else:
+            ordered = my_idx[:self.action_config.max_sources]
+        ordered = ordered[:self.action_config.max_sources]
+        ships = [planets[si].ships if si < len(planets) else 0 for si in ordered]
+
+        action_indices, _, _ = sample_action_discrete(
+            target_scores=tgt, stop_logits=stop, frac_logits_all=frac,
+            valid_targets=non_my_idx, source_ships=ships,
             max_launches=self.action_config.max_launches_per_source,
+            deterministic=True, ship_fractions=self.action_config.ship_fractions,
         )
+        return self._action_builder.decode_all(planets, action_indices, ordered, ships, non_my_idx)
 
     @staticmethod
     def batch_act(opponents_with_obs, device, action_config=None, obs_config=None,
                   game_config=None, episode_steps=500):
-        """Batch inference for multiple PolicyOpponents on GPU.
-
-        Groups opponents by policy identity so that opponents sharing the
-        same model checkpoint run in a single batched forward pass.
-        """
+        """Batch inference for multiple PolicyOpponents on GPU."""
         action_config = action_config or DEFAULT_CONFIG.action
         obs_config = obs_config or DEFAULT_CONFIG.obs
         game_config = game_config or DEFAULT_CONFIG.game
@@ -122,8 +146,7 @@ class PolicyOpponent:
             first = opponents_with_obs[indices[0]][0]
             policy = first.policy
 
-            obs_vectors = []
-            raw_obs_list = []
+            obs_vectors, raw_obs_list = [], []
             for idx in indices:
                 _, obs = opponents_with_obs[idx]
                 raw_obs_list.append(obs)
@@ -135,34 +158,29 @@ class PolicyOpponent:
 
             obs_tensor = torch.from_numpy(np.stack(obs_vectors)).float().to(device)
             with torch.no_grad():
-                source_logits_batch, slot_logits_batch, _, ownership_masks = policy(obs_tensor)
+                sg_b, tgt_b, stop_b, frac_b, _, omask_b = policy(obs_tensor)
 
             for i, idx in enumerate(indices):
                 _, obs = opponents_with_obs[idx]
-                # Select sources deterministically
                 src_indices = select_sources(
-                    source_logits_batch[i], ownership_masks[i],
-                    action_config.max_sources, deterministic=True,
+                    sg_b[i], omask_b[i], action_config.max_sources, deterministic=True,
                 )
-                # Build templates with selected sources
-                templates, ships = first._action_builder.build(
-                    obs, source_planet_ids=src_indices,
-                )
-                # Sample slot actions
-                action_indices, _, _ = sample_action_sequence(
-                    slot_logits_batch[i],
-                    templates,
-                    ships,
+                pbi, my_i, non_i, _ = first._action_builder.get_planet_data(obs)
+                if src_indices is not None:
+                    ordered = [int(x.item()) for x in src_indices]
+                else:
+                    ordered = my_i[:action_config.max_sources]
+                ordered = ordered[:action_config.max_sources]
+                ships = [pbi[si].ships if si < len(pbi) else 0 for si in ordered]
+
+                acts, _, _ = sample_action_discrete(
+                    target_scores=tgt_b[i], stop_logits=stop_b[i],
+                    frac_logits_all=frac_b[i],
+                    valid_targets=non_i, source_ships=ships,
                     max_launches=max_launches,
-                    deterministic=True,
-                    action_config=action_config,
+                    deterministic=True, ship_fractions=action_config.ship_fractions,
                 )
-                results[idx] = first._action_builder.decode(
-                    action_indices,
-                    templates,
-                    ships,
-                    max_launches=max_launches,
-                )
+                results[idx] = first._action_builder.decode_all(pbi, acts, ordered, ships, non_i)
 
         return results
 
@@ -213,9 +231,23 @@ class OpponentPool:
     def snapshots(self):
         return self._snapshots
 
-    def sample(self):
-        if not self._policy_instances:
-            return random.choice([NearestPlanetOpponent(), RandomOpponent()])
+    def sample(self, rule_prob: float = 0.0):
+        """Sample an opponent.
+
+        ``rule_prob`` gives the chance of returning a non-policy opponent
+        even when policy snapshots are available.  This prevents the
+        self-play from becoming too homogeneous.
+
+        Rule-based opponents: ``NearestPlanetOpponent`` (aggressive), a
+        pure random sender, or the built-in ``starter`` agent.
+        """
+        if not self._policy_instances or (rule_prob > 0 and random.random() < rule_prob):
+            return random.choice([
+                NearestPlanetOpponent(),
+                RandomOpponent(),
+                RuleBasedStarter(),
+            ])
+
         policy = random.choice(self._policy_instances)
         return PolicyOpponent(
             policy,
@@ -224,3 +256,6 @@ class OpponentPool:
             obs_config=self.obs_config,
             game_config=self.game_config,
         )
+
+
+

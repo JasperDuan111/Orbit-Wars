@@ -30,12 +30,13 @@ model:
     cross_attn_dims: [512, 256, 128]       # Cross-attention projection dims
 
 reward:
-  planet_count_scale: 0.02          # +0.02 per extra planet owned per step
+  planet_count_scale: 0.03          # +0.03 per extra planet owned per step (was 0.02)
   territory_scale: 3.0              # base reward per capture / loss event
   production_weight: 0.5            # quality multiplier: 1 + prod × weight
   neutral_capture_bonus: 2.0        # neutral capture = (1+2.0)× base = 3×
-  idle_penalty_scale: 0.1           # −0.1/step at full idle (fires from 0 %)
-  terminal_win_scale: 15.0          # asymmetric: losing hurts as much as winning helps
+  idle_penalty_scale: 0.15          # −0.15/step at full idle (was 0.1)
+  launch_bonus_scale: 0.03          # +0.03 per fleet launch — breaks STOP deadlock
+  terminal_win_scale: 15.0
   terminal_lose_scale: -15.0
   invalid_action_penalty: 0.1
 
@@ -50,29 +51,32 @@ train:
   seed: 42
 
   # ── Data scale ──
-  num_envs: 16
-  rollout_steps: 128
-  total_updates: 1500
+  num_envs: 10
+  rollout_steps: 64
+  total_updates: 2000
 
   # ── Credit assignment ──
   gamma: 0.99
   gae_lambda: 0.95
 
   # ── PPO clipping ──
-  clip_range: 0.2
+  clip_range: 0.3                # wider clip — allows bigger policy updates (was 0.2)
 
   # ── Optimisation ──
   learning_rate: 2.0e-4
   max_grad_norm: 0.5
 
   # ── Loss weights ──
-  ent_coef: 0.04
+  ent_coef: 0.05
   vf_coef: 1.0
+  value_reg: 0.01                # L2 penalty on value output — prevents collapse to constant
 
   # ── Training schedule ──
   batch_size: 128
   epochs: 3
 
   # ── Checkpoint & opponent ──
-  save_every: 50
-  opponent_refresh: 5
+  save_every: 20                 # faster opponent-pool refresh (was 50)
+  opponent_refresh: 3            # more frequent opponent rotation (was 5)
+  opponent_pool_capacity: 10
+  opponent_rule_prob: 0.3        # 30% chance of rule-based opponent (vs. policy opponent)

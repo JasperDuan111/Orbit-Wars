@@ -18,7 +18,7 @@ if _project_root not in sys.path:
 
 import torch
 
-from rl.action import ActionBuilder, sample_action_sequence, select_sources
+from rl.action import ActionBuilder, sample_action_discrete, select_sources
 from rl.config import OrbitWarsConfig
 from rl.models import ActorCritic, ActorCriticGNN
 from rl.obs import encode_observation
@@ -36,6 +36,7 @@ if CONFIG.model.model_type == "gnn":
         obs_config=CONFIG.obs,
         actions_per_source=CONFIG.action.actions_per_source,
         max_sources=CONFIG.action.max_sources,
+        n_fractions=len(CONFIG.action.ship_fractions),
         model_config=CONFIG.model,
     ).to(DEVICE)
 else:
@@ -74,29 +75,32 @@ def agent(obs):
 
     # 2. Model forward
     with torch.no_grad():
-        source_logits, slot_logits, _, ownership_mask = MODEL(obs_tensor)
-
-    source_logits = source_logits.squeeze(0)
-    slot_logits = slot_logits.squeeze(0)
-    ownership_mask = ownership_mask.squeeze(0)
+        sg, tgt, stop, frac, _, omask = MODEL(obs_tensor)
+    sg = sg.squeeze(0); tgt = tgt.squeeze(0); stop = stop.squeeze(0)
+    frac = frac.squeeze(0); omask = omask.squeeze(0)
 
     # 3. Select source planets
-    src_indices = select_sources(
-        source_logits, ownership_mask,
-        CONFIG.action.max_sources, deterministic=True,
-    )
+    src_indices = select_sources(sg, omask, CONFIG.action.max_sources, deterministic=True)
 
-    # 4. Build action templates
-    templates, source_ships = ACTION_BUILDER.build(obs, source_planet_ids=src_indices)
+    # 4. Planet metadata
+    planets, my_idx, non_my_idx, _ = ACTION_BUILDER.get_planet_data(obs)
+    if src_indices is not None:
+        ordered = [int(idx.item()) for idx in src_indices]
+    else:
+        ordered = my_idx[:CONFIG.action.max_sources]
+    ordered = ordered[:CONFIG.action.max_sources]
+    ships = [planets[si].ships if si < len(planets) else 0 for si in ordered]
 
-    # 5. Sample discrete actions
-    action_indices, _, _ = sample_action_sequence(
-        slot_logits, templates, source_ships,
-        max_launches=MAX_LAUNCHES, deterministic=True, action_config=CONFIG.action,
+    # 5. Sample discrete actions (two-step: target → fraction)
+    action_indices, _, _ = sample_action_discrete(
+        target_scores=tgt, stop_logits=stop, frac_logits_all=frac,
+        valid_targets=non_my_idx, source_ships=ships,
+        max_launches=MAX_LAUNCHES, deterministic=True,
+        ship_fractions=CONFIG.action.ship_fractions,
     )
 
     # 6. Decode to moves
-    return ACTION_BUILDER.decode(action_indices, templates, source_ships, max_launches=MAX_LAUNCHES)
+    return ACTION_BUILDER.decode_all(planets, action_indices, ordered, ships, non_my_idx)
 
 
 # ── CLI ──
@@ -129,7 +133,7 @@ def _patch_orbit_wars_struct():
 def main():
     parser = argparse.ArgumentParser(description="Run the PPO agent locally.")
     parser.add_argument("--checkpoint", type=str, required=True)
-    parser.add_argument("--opponent", type=str, default="random", choices=["random", "nearest"])
+    parser.add_argument("--opponent", type=str, default="random", choices=["random", "nearest", "starter"])
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--render", action="store_true")
     args = parser.parse_args()
@@ -144,8 +148,16 @@ def main():
 
     if args.opponent == "random":
         from kaggle_environments.envs.orbit_wars.orbit_wars import random_agent as opp_agent
+    elif args.opponent == "nearest":
+        from rl.opponents import NearestPlanetOpponent
+        _near = NearestPlanetOpponent()
+        opp_agent = lambda obs, _cfg=None: _near.act(obs)
+    elif args.opponent == "starter":
+        from rl.opponents import RuleBasedStarter
+        _st = RuleBasedStarter()
+        opp_agent = lambda obs, _cfg=None: _st.act(obs)
     else:
-        opp_agent = agent  # self-play for testing
+        opp_agent = agent
 
     env.run([agent, opp_agent])
 
