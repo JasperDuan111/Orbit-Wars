@@ -1,6 +1,8 @@
 from kaggle_environments import make
 from kaggle_environments.envs.orbit_wars.orbit_wars import Planet
 from kaggle_environments.utils import structify
+from typing import Any
+
 from ..action import ActionBuilder
 from ..config import ActionSpaceConfig, DEFAULT_CONFIG, EnvConfig, RewardConfig
 from ..opponents import NearestPlanetOpponent
@@ -91,7 +93,7 @@ class OrbitWarsSelfPlayEnv:
         self._last_source_ships = None
         return obs
 
-    def step(self, opponent_actions=None, my_action_override=None):
+    def step(self, only_economy, opponent_actions=None, my_action_override=None, update_count=0):
         """Step the environment.
 
         Args:
@@ -104,13 +106,15 @@ class OrbitWarsSelfPlayEnv:
         my_action = my_action or []
         my_action, invalid_count = self._sanitize_action(my_action, obs, player_id)
 
-        actions = [None] * self.num_players
+        actions: list[Any] = [None] * self.num_players
         actions[self.player_index] = my_action
         for opp_idx in range(self.num_players):
             if opp_idx == self.player_index:
                 continue
             opp_idx_in_list = opp_idx - 1 if opp_idx > self.player_index else opp_idx
-            if opponent_actions is not None and opp_idx_in_list in opponent_actions:
+            if only_economy:
+                opp_action = []
+            elif opponent_actions is not None and opp_idx_in_list in opponent_actions:
                 opp_action = opponent_actions[opp_idx_in_list]
             elif opp_idx_in_list < len(self._opponents):
                 opp_obs = self._get_obs(opp_idx)
@@ -121,7 +125,7 @@ class OrbitWarsSelfPlayEnv:
         self._env.step(actions)
 
         obs = self._get_obs(self.player_index)
-        my_total, enemy_total, diff, reward = self._compute_reward(obs, player_id)
+        my_total, enemy_total, diff, reward = self._compute_reward(obs, player_id, update_count)
 
         info = {
             "my_total": my_total,
@@ -129,15 +133,11 @@ class OrbitWarsSelfPlayEnv:
             "diff": diff,
             "invalid_count": invalid_count,
         }
-        if invalid_count > 0:
-            reward -= self._reward_calc.invalid_action_penalty * invalid_count
-        # Small bonus per valid launch — breaks the STOP deadlock early in training.
-        reward += self._reward_calc.launch_bonus_scale * len(my_action)
         return obs, reward, self._is_done(), info
 
-    def _compute_reward(self, obs, player_id):
+    def _compute_reward(self, obs, player_id, update_count):
         """Delegate to RewardCalculator.  Returns (my_total, enemy_total, diff, reward)."""
-        return self._reward_calc.compute(obs, player_id, self._is_done())
+        return self._reward_calc.compute(obs, player_id, self._is_done(), update_count)
 
     def _get_obs(self, index):
         return self._env.state[index]["observation"]
@@ -145,7 +145,7 @@ class OrbitWarsSelfPlayEnv:
     def _is_done(self):
         if hasattr(self._env, "done"):
             return bool(self._env.done)
-        return all(state.status != "ACTIVE" for state in self._env.state)
+        return all(_get_field(state, "status") != "ACTIVE" for state in self._env.state)
 
     def _sanitize_action(self, action, obs, player_id):
         if not action:

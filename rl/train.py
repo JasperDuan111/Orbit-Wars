@@ -376,8 +376,10 @@ def main():
 
                     # 6. Step env
                     next_obs, reward, done, _info = env.step(
+                        config.reward.only_economy,
                         opponent_actions=opponent_actions_per_env[i],
                         my_action_override=my_moves,
+                        update_count = update,
                     )
                     rewards[i] = reward
                     dones[i] = float(done)

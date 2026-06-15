@@ -8,7 +8,7 @@
 
 - **两层层次化离散动作空间**：第一层由 GNN 学习选择发射源星球（Gumbel top-k），第二层在每个槽位上输出自回归发射序列（停止 / 向某目标发送某比例的飞船）
 - **GNN + Self-Attention + Cross-Attention 模型**：图卷积编码星球关系，自注意力编码舰队关系，交叉注意力融合两者。MLP 模型为回退选项
-- **五维归一化奖励函数**：舰船优势变化量 / 领土事件（含中立占领加成） / 战斗效率 / 闲置惩罚 / 主导终局（±10）
+- **Economy-only 奖励函数**：fleet 优势 / production 对数优势 / 终局 fleet 效率，用于先训练快速占星和经济发育
 - **固定维度观测编码**：48 星球 × 11 特征 + 64 舰队 × 9 特征 + 6 全局特征 = 1110 维向量
 - **GAE 优势估计 + PPO clip loss + 价值函数裁剪**
 
@@ -49,7 +49,7 @@ rl/
 - `ModelConfig`：模型类型（`model_type` = "mlp" 或 "gnn"）及超参（`hidden_sizes`, `dropout`, `gnn` 子配置）
 - `GNNConfig`：GNN 超参（`hg=128`, `hf=128`, `ha=64`, `num_gcn_layers=2`）
 - `TrainConfig`：PPO 训练超参数
-- `RewardConfig`：五维奖励缩放参数
+- `RewardConfig`：economy reward 缩放参数
 - `EnvConfig`：环境运行参数（`num_players`, `episode_steps`, `act_timeout`, `seed`, `debug`）
 
 **`OrbitWarsConfig.from_yaml(path)`** — 从 YAML 文件构建完整配置。
@@ -76,19 +76,14 @@ rl/
 | `save_every` | 50 | 每 N 轮保存 checkpoint |
 | `opponent_refresh` | 10 | 每 N 轮重新采样对手 |
 
-**RewardConfig 字段（五维奖励）：**
+**RewardConfig 字段（economy reward）：**
 
 | 参数 | 默认值 | 维度 |
 |---|---|---|
-| `ship_advantage_delta_scale` | 1.0 | ① 舰船优势变化 |
-| `territory_scale` | 2.0 | ② 领土事件 |
-| `production_weight` | 0.5 | ② 星球质量倍率 |
-| `neutral_capture_bonus` | 0.5 | ② 中立星球占领额外加成 |
-| `combat_efficiency_scale` | 0.3 | ③ 战斗效率 |
-| `idle_penalty_scale` | 0.05 | ④ 闲置惩罚 |
-| `idle_threshold` | 0.5 | ④ 闲置触发阈值 |
-| `terminal_win_scale` / `terminal_lose_scale` | ±10.0 | ⑤ 终局 |
-| `invalid_action_penalty` | 0.1 | 非法动作惩罚 |
+| `fleet_advantage_scale` | `1e-4` | ① fleet 优势 |
+| `production_advantage_scale` | `0.02` | ② production 对数优势 |
+| `terminal_economy_scale` | `0.1` | ③ 终局 fleet 效率 |
+| `only_economy` | `False` | 启用 economy-only reward 与不行动对手 |
 
 ---
 
@@ -348,19 +343,17 @@ tensorboard --logdir runs/OrbitWars
 - **`step(action_indices, opponent_actions, action_templates_override, source_ships_override)`** → `(obs, reward, done, info)`
   - 支持模板/舰船覆盖（配合训练循环中按选定源构建的模板）
   - `_sanitize_action` 过滤非法 moves
-  - 委托 `RewardCalculator.compute()` 计算五维奖励
+  - `only_economy=True` 时对手动作强制为空，委托 `RewardCalculator.compute()` 计算三项 economy reward
 
 - **`_compute_reward(obs, player_id)`** → 一行委托 `self._reward_calc.compute(obs, player_id, self._is_done())`
 
-**奖励函数（`rewards.py` 独立模块）** — **五维归一化奖励**：
+**奖励函数（`rewards.py` 独立模块）** — **economy-only reward**：
 
 | 维度 | 每步范围 | 机制 |
 |------|---------|------|
-| ① 舰船优势变化 | ±0.01~0.05 | `Δ(my/(my+enemy+1)) × ship_delta_scale`，奖励改善趋势 |
-| ② 领土事件 | ±2~18（稀疏） | `±(1 + prod × weight) × territory_scale`，中立占领 ×1.5 加成 |
-| ③ 战斗效率 | ±0.15 | `(敌方损失 / 总损失 − 0.5) × combat_scale`，有战斗时触发 |
-| ④ 闲置惩罚 | −0.025~0 | `max(0, 驻守比例 − threshold) × idle_scale` |
-| ⑤ 终局 | ±10 | 胜利/失败（主导信号，确保最终优化目标为取胜） |
+| ① Fleet 优势 | 随舰队规模增长 | `(my_fleets - enemy_fleets) × fleet_advantage_scale` |
+| ② Production 优势 | 随产能增长 | `(my_prod × log(my_prod) - enemy_prod × log(enemy_prod)) × production_advantage_scale` |
+| ③ 终局效率 | 终局触发 | `my_fleets / total_board_production × terminal_economy_scale` |
 
 - **`_sanitize_action(action, obs, player_id)`** → `(clean_moves, invalid_count)`
   - 校验每条 move：格式正确、来源星球存在、舰船足够
@@ -438,7 +431,7 @@ ActionBuilder.decode()
    ↓ moves [[from_id, angle, ships], ...]
 _sanitize_action()
    ↓ verified moves → Kaggle env
-   ↓ reward (五维), done
+   ↓ reward (economy-only), done
 RolloutBuffer 收集 (obs, actions, logprobs, rewards, dones, values,
                      action_templates, source_ships, source_indices)
    ↓ rollout complete
@@ -454,70 +447,41 @@ OpponentPool.add(state_dict)  ← 定期加入对手池
 
 ## 6. 奖励函数设计
 
-五维归一化奖励函数，核心原则：**密集信号用变化量（Δ）而非绝对值来避免激励惰性策略，终端信号主导以确保最终优化目标是取胜，稀疏事件提供明确的阶段性正反馈。**
+当前 `only_economy=True` 启用 economy-only reward，用于先训练模型在对手不行动时快速占领星球、提高 production，并把 production 转化为 fleets。`only_economy=False` 暂不叠加旧版 reward。
 
 ### 设计哲学
 
 ```
-每步奖励 ≈ 0.01 (delta) + 0 (无事件时) − 0.01 (idle) ≈ 0
-占领中立星球 ≈ +3~8   (清晰的阶段性正信号)
-占领敌方星球 ≈ +2~6   (明确的攻防信号)
-终端胜负     ≈ ±10    (主导信号，确保 agent 以赢为目标而非刷分)
+每步奖励 = fleet 优势项 + production 对数优势项
+终局奖励 = my_fleets / total_board_production × terminal_economy_scale
 ```
 
-- **变化量优于绝对值**：舰船优势奖励 Δ而非水平值 → 不奖励"已占据优势后躺平"
-- **不设生存奖励**：每步存活奖励会训练 agent 拖延而非进取
-- **中立占领有加成**：零成本扩张是早期游戏的核心策略，应有清晰正反馈
-- **终端信号主导**：±10 远超任何单步密集信号（~0.01），agent 最终一定会优化取胜目标
+- **不使用占领事件奖励**：占领星球通过 production 提升和后续 fleet 增长自然反映，不再额外给占领奖励。
+- **Fleet 是最终经济产出**：直接奖励 `my_fleets - enemy_fleets`，鼓励尽快扩大舰队规模。
+- **Production 是领先指标**：`prod × log(prod)` 给占星和高产出发地即时信号，缓解 fleet 增长的延迟 credit assignment。
+- **对手不行动**：economy 模式下环境强制敌方 action 为 `[]`，把任务简化为单方经济扩张 curriculum。
 
-### ① 舰船优势变化（每步，密集）
-
-```
-ratio = my / (my + enemy + 1)
-reward = Δ(ratio) × ship_delta_scale(1.0)     [每步 ±0.01~0.05]
-```
-- 激励：做出能改善相对实力的动作（占领星球、有效攻击）
-- 不激励：已占优势后单纯维持（Δ≈0，无奖励）
-- 全 episode 累计最多 ±1，不会被密集信号淹没
-
-### ② 领土事件（事件驱动，稀疏）
+### ① Fleet 优势（每步，密集）
 
 ```
-quality = 1 + planet.production × production_weight(0.5)
-捕获己方星球:    +quality × territory_scale(2.0)      (≈ +2~+6)
-丢失己方星球:    −quality × territory_scale(2.0)      (≈ −2~−6)
-占领中立星球:    +quality × territory_scale × 1.5     (≈ +2.25~+9)
+reward = (my_fleets - enemy_fleets) × fleet_advantage_scale
+默认 fleet_advantage_scale = 1e-4
 ```
-- 只在归属变更的步触发，稀疏但高价值
-- 高生产力星球价值是低生产力星球的 3-6 倍
-- **中立占领 ×1.5 加成**：零成本扩张是早期游戏核心竞争力
 
-### ③ 战斗效率（有战斗时触发）
+### ② Production 对数优势（每步，密集）
 
 ```
-效率 = 敌方损失 / (我方损失 + 敌方损失 + ε) − 0.5     [−0.5, +0.5]
-reward = 效率 × combat_scale(0.3)                    [−0.15, +0.15]
+prod_value(p) = p × log(p), p <= 0 时为 0
+reward = (prod_value(my_prod) - prod_value(enemy_prod)) × production_advantage_scale
+默认 production_advantage_scale = 0.02
 ```
-- 10:1 碾压 ≈ +0.14；1:10 惨败 ≈ −0.14
-- 只在双方总损失 > 1 时触发
-- 缩减尺度（0.5→0.3）：ship-count 估算含噪声（飞行中的舰船被视为"损失"）
 
-### ④ 闲置惩罚（每步）
+### ③ 终局 Fleet 效率
 
 ```
-idle = 驻守舰船 / 总舰船
-penalty = max(0, idle − 0.5) × idle_scale(0.05)   [−0.025, 0]
+reward = my_fleets / total_board_production × terminal_economy_scale
+默认 terminal_economy_scale = 0.1
 ```
-- 50% 以下不触发：允许必要的防御性囤积
-- 缩减尺度（0.1→0.05）：进攻意愿主要由事件奖励驱动，轻量惩罚仅防极端惰性
-
-### ⑤ 终局
-
-```
-胜利: +10.0    失败: −10.0
-```
-- **主导信号**：约为单步密集信号的 1000 倍，密集信号总和的 10 倍
-- 确保 agent 最终优化的目标是取胜而非最大化 shaping reward
 
 ---
 
@@ -542,7 +506,7 @@ penalty = max(0, idle − 0.5) × idle_scale(0.05)   [−0.025, 0]
 
 ### 7.4 奖励函数增强
 - **彗星过滤**：领土奖励中排除彗星归属变更（彗星到期消失时触发"丢失星球"误报）
-- **战斗效率精确化**：利用游戏引擎实际的 combat 结算数据替代 ship-count 估算
+- **经济效率精细化**：记录每局 production 曲线与 fleet 曲线，用于调节 dense reward 系数
 - **对手实力感知**：根据对手强度缩放奖励，防止对弱对手过拟合
 - **阶段自适应权重**：前期放大领土奖励（鼓励扩张），后期放大终局奖励（鼓励取胜）
 

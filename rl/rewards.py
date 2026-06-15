@@ -1,31 +1,6 @@
-"""Reward function for Orbit Wars PPO training.
+"""Reward function for Orbit Wars PPO training."""
 
-Design principles
------------------
-1. **Planet count, not ship count.**  Owning more planets is the real
-   strategic objective; ship counts fluctuate with combat and production
-   but are means, not ends.  Rewarding planet-count advantage directly
-   incentivises expansion.
-
-2. **Idle penalty with zero threshold.**  Every ship parked on a planet
-   is a ship not doing anything useful.  A per-step penalty proportional
-   to idle fraction forces the agent to *always* be doing something.
-
-3. **Sparse, high-magnitude territory events.**  Capturing/losing a
-   planet is the clearest signal in the game — it should produce a
-   reward spike the agent cannot miss.  Neutral captures get a large
-   bonus because zero-cost expansion is the most important early-game
-   skill.
-
-4. **Asymmetric terminal reward.**  Losing (−15) hurts more than winning
-   (+15) rewards — this asymmetry makes "sit still and hope" a losing
-   strategy in expectation, even against weak opponents.
-
-5. **No ship-advantage shaping.**  Ship-count deltas punish launching
-   fleets (ships in combat look like "losses") — a perverse incentive
-   the previous reward suffered from.
-"""
-
+import math
 from typing import Dict, Optional, Tuple
 
 from kaggle_environments.envs.orbit_wars.orbit_wars import Planet
@@ -64,6 +39,17 @@ def planet_production_totals(obs, player_id) -> Tuple[float, float]:
     my_prod = sum(p.production for p in planets if p.owner == player_id)
     eny_prod = sum(p.production for p in planets if p.owner not in (-1, player_id))
     return my_prod, eny_prod
+
+
+def total_planet_production(obs) -> float:
+    """Return total production for all planets on the board."""
+    return sum(p.production for p in _parse_planets_list(obs))
+
+
+def _prod_log_value(production: float) -> float:
+    if production <= 0:
+        return 0.0
+    return production * math.log(production)
 
 
 def planet_production(obs, planet_id) -> float:
@@ -110,6 +96,9 @@ class RewardCalculator:
         config = reward_config or DEFAULT_CONFIG.reward
 
         # ── Scales ──
+        self.fleet_advantage_scale: float = config.fleet_advantage_scale
+        self.production_advantage_scale: float = config.production_advantage_scale
+        self.terminal_economy_scale: float = config.terminal_economy_scale
         self.planet_count_scale: float = config.planet_count_scale
         self.territory_scale: float = config.territory_scale
         self.production_weight: float = config.production_weight
@@ -123,6 +112,8 @@ class RewardCalculator:
         # ── Per-episode tracking ──
         self._last_planet_owners: Optional[Dict[int, int]] = None
 
+        self.only_economy = config.only_economy
+
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
@@ -132,7 +123,7 @@ class RewardCalculator:
         self._last_planet_owners = planet_owner_map(obs)
 
     def compute(
-        self, obs, player_id: int, is_done: bool,
+        self, obs, player_id: int, is_done: bool, update_cont: int
     ) -> Tuple[float, float, float, float]:
         """Compute the per-step reward.
 
@@ -147,18 +138,10 @@ class RewardCalculator:
         diff = my_total - enemy_total
 
         reward = 0.0
-
-        # ── Dense: planet-count advantage ──
-        reward += self._planet_count_advantage(obs, player_id)
-
-        # ── Sparse: territory changes ──
-        reward += self._territory_change(obs, player_id)
-
-        # ── Dense: idle-ship penalty (fires from 0 %, no threshold) ──
-        reward += self._idle_penalty(obs, player_id)
-
-        # ── Terminal ──
-        reward += self._terminal_reward(diff, is_done)
+        if self.only_economy:
+            reward += self._economy_fleet_advantage(my_total, enemy_total)
+            reward += self._economy_production_advantage(obs, player_id)
+            reward += self._economy_terminal(obs, player_id, my_total, is_done)
 
         # ── Persist ──
         self._last_planet_owners = planet_owner_map(obs)
@@ -168,6 +151,22 @@ class RewardCalculator:
     # ------------------------------------------------------------------
     #  Reward components
     # ------------------------------------------------------------------
+
+    def _economy_fleet_advantage(self, my_total: float, enemy_total: float) -> float:
+        return (my_total - enemy_total) * self.fleet_advantage_scale
+
+    def _economy_production_advantage(self, obs, player_id: int) -> float:
+        my_prod, enemy_prod = planet_production_totals(obs, player_id)
+        advantage = _prod_log_value(my_prod) - _prod_log_value(enemy_prod)
+        return advantage * self.production_advantage_scale
+
+    def _economy_terminal(self, obs, player_id: int, my_total: float, is_done: bool) -> float:
+        if not is_done:
+            return 0.0
+        total_prod = total_planet_production(obs)
+        if total_prod <= 0:
+            return 0.0
+        return (my_total / total_prod) * self.terminal_economy_scale
 
     # 1 ── Planet-count advantage  (per step, dense) ─────────────────
     def _planet_count_advantage(self, obs, player_id: int) -> float:

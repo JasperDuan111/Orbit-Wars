@@ -71,7 +71,19 @@ class ModelConfig:
 
 @dataclass
 class RewardConfig:
-    # ── Dense: planet-count advantage per step ──
+    # ── Economy mode: dense fleet advantage per step ──
+    #     reward = (my_fleets - enemy_fleets) * scale
+    fleet_advantage_scale: float = 1e-4
+
+    # ── Economy mode: dense production advantage per step ──
+    #     reward = (my_prod * log(my_prod) - enemy_prod * log(enemy_prod)) * scale
+    production_advantage_scale: float = 0.02
+
+    # ── Economy mode: terminal fleet efficiency ──
+    #     reward = my_fleets / total_board_production * scale
+    terminal_economy_scale: float = 0.1
+
+    # ── Legacy dense: planet-count advantage per step ──
     #     reward = (my_planets − enemy_planets) × scale
     planet_count_scale: float = 0.03
 
@@ -92,6 +104,8 @@ class RewardConfig:
 
     # ── Invalid-action penalty (applied by env wrapper) ──
     invalid_action_penalty: float = 0.1
+
+    only_economy: bool = False
 
 
 @dataclass

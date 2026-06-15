@@ -30,6 +30,9 @@ model:
     cross_attn_dims: [512, 256, 128]       # Cross-attention projection dims
 
 reward:
+  fleet_advantage_scale: 1.0e-4      # economy: (my_fleets - enemy_fleets) per step
+  production_advantage_scale: 0.02   # economy: my_prod*log(my_prod) - enemy_prod*log(enemy_prod)
+  terminal_economy_scale: 0.1        # economy terminal: my_fleets / total_board_production
   planet_count_scale: 0.03          # +0.03 per extra planet owned per step (was 0.02)
   territory_scale: 3.0              # base reward per capture / loss event
   production_weight: 0.5            # quality multiplier: 1 + prod × weight
@@ -39,6 +42,7 @@ reward:
   terminal_win_scale: 15.0
   terminal_lose_scale: -15.0
   invalid_action_penalty: 0.1
+  only_economy: true
 
 env:
   num_players: 2
