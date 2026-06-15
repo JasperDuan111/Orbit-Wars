@@ -1005,8 +1005,8 @@ def interpreter(state, env):
     for f in obs0["fleets"]:
         alive_players.add(f[1])
 
-    if len(alive_players) <= 1:
-        terminated = True
+    # if len(alive_players) <= 1:
+    #     terminated = True
 
     if terminated:
         for s in state:

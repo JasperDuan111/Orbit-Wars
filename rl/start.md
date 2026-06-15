@@ -72,7 +72,7 @@ rl/
 | `vf_coef` | 0.5 | 价值损失权重 |
 | `max_grad_norm` | 0.5 | 梯度裁剪阈值 |
 | `batch_size` | 64 | mini-batch 大小 |
-| `epochs` | 4 | 每轮数据重复训练次数 |
+| `epochs` | 3 | 每轮数据重复训练次数 |
 | `save_every` | 50 | 每 N 轮保存 checkpoint |
 | `opponent_refresh` | 10 | 每 N 轮重新采样对手 |
 
