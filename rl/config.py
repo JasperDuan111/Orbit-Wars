@@ -44,14 +44,15 @@ class ObsConfig:
 
 @dataclass(frozen=True)
 class ActionSpaceConfig:
-    max_sources: int = 8
-    max_targets: int = 20
-    ship_fractions: Tuple[float, ...] = (0.25, 0.5, 0.75, 1.0)
-    max_launches_per_source: int = 6
+    max_sources: int = 16
+    max_targets: int = 16
+    ship_fractions: Tuple[float, ...] = (0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0)
+    ship_intercept: Tuple[float, ...] = (0,)
+    max_launches_per_source: int = 3
 
     @property
     def actions_per_source(self) -> int:
-        return 1 + self.max_targets * len(self.ship_fractions)
+        return 1 + self.max_targets * len(self.ship_fractions) #* len(self.ship_intercept)
 
 
 @dataclass(frozen=True)
