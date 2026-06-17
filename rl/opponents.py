@@ -235,7 +235,7 @@ class OpponentPool:
     def snapshots(self):
         return self._snapshots
 
-    def sample(self, rule_prob: float = 0.0):
+    def sample(self, only_economy, rule_prob: float = 0.0):
         """Sample an opponent.
 
         ``rule_prob`` gives the chance of returning a non-policy opponent
@@ -245,6 +245,9 @@ class OpponentPool:
         Rule-based opponents: ``NearestPlanetOpponent`` (aggressive), a
         pure random sender, or the built-in ``starter`` agent.
         """
+        if only_economy:
+            return DoNothingOpponent()
+
         if not self._policy_instances or (rule_prob > 0 and random.random() < rule_prob):
             return random.choice([
                 NearestPlanetOpponent(),

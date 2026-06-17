@@ -242,7 +242,7 @@ def main():
             print("  Old-format checkpoint — only policy restored.  Starting at update 1")
 
     for env in envs:
-        env.set_opponent(pool.sample(rule_prob=config.train.opponent_rule_prob))
+        env.set_opponent(pool.sample(config.reward.only_economy, rule_prob=config.train.opponent_rule_prob))
 
     obs_list = [env.reset() for env in envs]
 
@@ -385,7 +385,7 @@ def main():
                     dones[i] = float(done)
 
                     if done:
-                        env.set_opponent(pool.sample(rule_prob=config.train.opponent_rule_prob))
+                        env.set_opponent(pool.sample(config.reward.only_economy, rule_prob=config.train.opponent_rule_prob))
                         next_obs = env.reset()
 
                     next_obs_list.append(next_obs)
@@ -472,7 +472,7 @@ def main():
 
             if update % config.train.opponent_refresh == 0:
                 for env in envs:
-                    env.set_opponent(pool.sample(rule_prob=config.train.opponent_rule_prob))
+                    env.set_opponent(pool.sample(config.reward.only_economy, rule_prob=config.train.opponent_rule_prob))
 
     finally:
         total_time = time.time() - total_start_time
