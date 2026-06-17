@@ -133,7 +133,7 @@ def _patch_orbit_wars_struct():
 def main():
     parser = argparse.ArgumentParser(description="Run the PPO agent locally.")
     parser.add_argument("--checkpoint", type=str, required=True)
-    parser.add_argument("--opponent", type=str, default="random", choices=["random", "nearest", "starter"])
+    parser.add_argument("--opponent", type=str, default="random", choices=["random", "nearest", "starter", "nothing"])
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--render", action="store_true")
     args = parser.parse_args()
