@@ -80,6 +80,10 @@ class RuleBasedStarter:
                     moves.append([mp.id, angle, ships])
         return moves
 
+class DoNothingOpponent:
+    def act(self, obs):
+        return []
+
 
 class PolicyOpponent:
     def __init__(

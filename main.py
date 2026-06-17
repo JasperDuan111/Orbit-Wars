@@ -156,6 +156,10 @@ def main():
         from rl.opponents import RuleBasedStarter
         _st = RuleBasedStarter()
         opp_agent = lambda obs, _cfg=None: _st.act(obs)
+    elif args.opponent == "nothing":
+        from rl.opponents import DoNothingOpponent
+        _no = DoNothingOpponent()
+        opp_agent = lambda obs, _cfg=None: _no.act(obs)
     else:
         opp_agent = agent
 
