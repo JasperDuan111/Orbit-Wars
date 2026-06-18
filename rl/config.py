@@ -23,15 +23,16 @@ class GameConfig:
     board_size: float = 100.0
     center_x: float = 50.0
     center_y: float = 50.0
+    sun_radius: float = 10.0
 
 
 @dataclass(frozen=True)
 class ObsConfig:
     max_planets: int = 48
     max_fleets: int = 64
-    planet_features: int = 11
-    fleet_features: int = 9
-    global_features: int = 6
+    planet_features: int = 14
+    fleet_features: int = 12
+    global_features: int = 9
 
     @property
     def obs_dim(self) -> int:

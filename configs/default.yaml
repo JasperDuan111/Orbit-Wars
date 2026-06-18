@@ -6,13 +6,14 @@ game:
   board_size: 100.0
   center_x: 50.0
   center_y: 50.0
+  sun_radius: 10.0
 
 obs:
   max_planets: 48
   max_fleets: 64
-  planet_features: 11
-  fleet_features: 9
-  global_features: 6
+  planet_features: 14
+  fleet_features: 12
+  global_features: 9
 
 action:
   max_sources: 16

@@ -58,6 +58,11 @@ def encode_observation(
     player_id = _get_field(obs, "player", 0)
     planets, fleets = parse_entities(obs)
     comet_ids = set(_get_field(obs, "comet_planet_ids", []))
+    board_size = game_config.board_size
+    sun_x = game_config.center_x
+    sun_y = game_config.center_y
+    sun_radius = game_config.sun_radius
+    sun_radius_norm = sun_radius / board_size
 
     planet_features = np.zeros((max_planets, obs_config.planet_features), dtype=np.float32)
     fleet_features = np.zeros((max_fleets, obs_config.fleet_features), dtype=np.float32)
@@ -65,20 +70,23 @@ def encode_observation(
     def _planet_sort_key(p):
         is_me = 1 if p.owner == player_id else 0
         is_enemy = 1 if (p.owner != player_id and p.owner != -1) else 0
-        dist = math.hypot(p.x - game_config.center_x, p.y - game_config.center_y)
+        dist = math.hypot(p.x - sun_x, p.y - sun_y)
         return (-is_me, -is_enemy, dist)
 
     for idx, p in enumerate(sorted(planets, key=_planet_sort_key)[:max_planets]):
         is_me = 1.0 if p.owner == player_id else 0.0
         is_neutral = 1.0 if p.owner == -1 else 0.0
         is_enemy = 1.0 if (p.owner != player_id and p.owner != -1) else 0.0
-        x_norm = p.x / game_config.board_size
-        y_norm = p.y / game_config.board_size
-        radius_norm = p.radius / 10.0
+        x_norm = p.x / board_size
+        y_norm = p.y / board_size
+        radius_norm = p.radius / board_size
         ships_norm = _log_scale(p.ships)
         production_norm = p.production / 5.0
         is_comet = 1.0 if p.id in comet_ids else 0.0
-        dist = math.hypot(p.x - game_config.center_x, p.y - game_config.center_y)
+        dx_to_sun = (p.x - sun_x) / board_size
+        dy_to_sun = (p.y - sun_y) / board_size
+        dist = math.hypot(p.x - sun_x, p.y - sun_y)
+        clearance_to_sun = (dist - sun_radius - p.radius) / board_size
         is_inner = 1.0 if dist + p.radius < 50.0 else 0.0
         planet_id_norm = p.id / max_planets
         planet_features[idx] = [
@@ -93,18 +101,26 @@ def encode_observation(
             production_norm,
             is_comet,
             is_inner,
+            dx_to_sun,
+            dy_to_sun,
+            clearance_to_sun,
         ]
 
     for idx, f in enumerate(sorted(fleets, key=lambda item: (item.x, item.y))[:max_fleets]):
         is_me = 1.0 if f.owner == player_id else 0.0
         is_enemy = 1.0 if f.owner != player_id else 0.0
-        x_norm = f.x / game_config.board_size
-        y_norm = f.y / game_config.board_size
+        x_norm = f.x / board_size
+        y_norm = f.y / board_size
         cos_a = math.cos(f.angle)
         sin_a = math.sin(f.angle)
         ships_norm = _log_scale(f.ships)
         fleet_id_norm = f.id / max_fleets
         from_planet_norm = f.from_planet_id / max_planets
+        dx_sun_ahead = (sun_x - f.x) / board_size
+        dy_sun_ahead = (sun_y - f.y) / board_size
+        sun_forward = dx_sun_ahead * cos_a + dy_sun_ahead * sin_a
+        sun_lateral = abs(dx_sun_ahead * sin_a - dy_sun_ahead * cos_a)
+        sun_clearance = sun_lateral - sun_radius_norm
         fleet_features[idx] = [
             fleet_id_norm,
             from_planet_norm,
@@ -115,6 +131,9 @@ def encode_observation(
             cos_a,
             sin_a,
             ships_norm,
+            sun_forward,
+            sun_lateral,
+            sun_clearance,
         ]
 
     step = _get_field(obs, "step", 0)
@@ -131,6 +150,9 @@ def encode_observation(
             num_neutral / max_planets,
             _log_scale(my_total),
             _log_scale(enemy_total),
+            sun_x / board_size,
+            sun_y / board_size,
+            sun_radius_norm,
         ],
         dtype=np.float32,
     )

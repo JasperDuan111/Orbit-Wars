@@ -9,7 +9,7 @@
 - **两层层次化离散动作空间**：第一层由 GNN 学习选择发射源星球（Gumbel top-k），第二层在每个槽位上输出自回归发射序列（停止 / 向某目标发送某比例的飞船）
 - **GNN + Self-Attention + Cross-Attention 模型**：图卷积编码星球关系，自注意力编码舰队关系，交叉注意力融合两者。MLP 模型为回退选项
 - **Economy-only 奖励函数**：fleet 优势 / production 对数优势 / 终局 fleet 效率，用于先训练快速占星和经济发育
-- **固定维度观测编码**：48 星球 × 11 特征 + 64 舰队 × 9 特征 + 6 全局特征 = 1110 维向量
+- **固定维度观测编码**：48 星球 × 14 特征 + 64 舰队 × 12 特征 + 9 全局特征 = 1449 维向量
 - **GAE 优势估计 + PPO clip loss + 价值函数裁剪**
 
 ---
@@ -22,7 +22,7 @@ rl/
 ├── config.py                # 配置分组与默认配置（OrbitWarsConfig 等）
 ├── models.py                # Actor-Critic 网络定义（MLP + GNN 双模型）
 ├── action.py                # 动作空间：源选择 + 槽位动作编解码 + 采样/对数概率
-├── obs.py                   # 观测编码：原始 dict → 固定维度 numpy 向量 (1110,)
+├── obs.py                   # 观测编码：原始 dict → 固定维度 numpy 向量 (1449,)
 ├── ppo.py                   # RolloutBuffer（经验存储）+ PPOTrainer（更新逻辑）
 ├── train.py                 # 主训练入口：批量 rollout + 自对弈循环
 ├── rewards.py               # 奖励函数：RewardCalculator + 辅助函数（独立于环境）
@@ -44,7 +44,7 @@ rl/
 **核心结构：**
 
 - `GameConfig`：地图与几何常量（`board_size=100`, `center_x/center_y=50`）
-- `ObsConfig`：观测规模（`max_planets=48`, `max_fleets=64`, `planet_features=11`, `fleet_features=9`, `global_features=6`）。`obs_dim` 属性自动计算 = 1110
+- `ObsConfig`：观测规模（`max_planets=48`, `max_fleets=64`, `planet_features=14`, `fleet_features=12`, `global_features=9`）。`obs_dim` 属性自动计算 = 1449
 - `ActionSpaceConfig`：动作规模（`max_sources=20`, `max_targets=20`, `ship_fractions`, `max_launches_per_source=3`）。`actions_per_source` = `1 + max_targets × len(ship_fractions)`
 - `ModelConfig`：模型类型（`model_type` = "mlp" 或 "gnn"）及超参（`hidden_sizes`, `dropout`, `gnn` 子配置）
 - `GNNConfig`：GNN 超参（`hg=128`, `hf=128`, `ha=64`, `num_gcn_layers=2`）
@@ -95,8 +95,8 @@ rl/
 
 #### `class ActorCritic(nn.Module)` — MLP 回退模型
 
-- 输入：观测向量 `(batch, 1110)`
-- Body：3 层 MLP (1110 → 512 → 512 → 256)，输出 256 维特征
+- 输入：观测向量 `(batch, 1449)`
+- Body：3 层 MLP (1449 → 512 → 512 → 256)，输出 256 维特征
 - 槽位策略头 `slot_policy_head`：`Linear(256, max_sources × actions_per_source)` → reshape 为 `(batch, max_sources, actions_per_source)`
 - 源选择 logits：`fallback_source_logits` 为非空间回退（MLP 无每行星嵌入结构），`ActionBuilder` 检测到后会回退到按舰船数排序
 - 价值头 `value_head`：`Linear(256, 1)`
@@ -197,25 +197,26 @@ Plackett-Luce 不放回次序 log-prob：对选出的每个行星，计算其在
 
 ### 3.4 `obs.py` — 观测编码
 
-将 Kaggle 环境的原始 dict 编码为固定维度 `np.float32(1110,)` 向量。
+将 Kaggle 环境的原始 dict 编码为固定维度 `np.float32(1449,)` 向量。
 
 **辅助函数：**
 - `_log_scale(value, max_value=1000.0)` — `log(x+1) / log(max+1)`
 - `parse_entities(obs)` — 解析 planets 和 fleets
 - `ship_totals(obs, player_id)` — 统计某玩家总舰船数（驻守 + 飞行中）
 
-**`encode_observation(obs, ...)` → `np.ndarray(1110,)`**
+**`encode_observation(obs, ...)` → `np.ndarray(1449,)`**
 
 | 组成部分 | 维度 | 特征列表 |
 |---------|------|---------|
-| 行星特征 | 48 × 11 | `[planet_id_norm, is_me, is_enemy, is_neutral, x_norm, y_norm, radius_norm, ships_log, production_norm, is_comet, is_inner]` |
-| 舰队特征 | 64 × 9 | `[fleet_id_norm, from_planet_id_norm, is_me, is_enemy, x_norm, y_norm, cos_a, sin_a, ships_log]` |
-| 全局特征 | 6 | `[step/500, my_planets/48, enemy_planets/48, neutral/48, my_ships_log, enemy_ships_log]` |
+| 行星特征 | 48 × 14 | `[planet_id_norm, is_me, is_enemy, is_neutral, x_norm, y_norm, radius_norm, ships_log, production_norm, is_comet, is_inner, dx_to_sun, dy_to_sun, clearance_to_sun]` |
+| 舰队特征 | 64 × 12 | `[fleet_id_norm, from_planet_id_norm, is_me, is_enemy, x_norm, y_norm, cos_a, sin_a, ships_log, sun_forward, sun_lateral, sun_clearance]` |
+| 全局特征 | 9 | `[step/500, my_planets/48, enemy_planets/48, neutral/48, my_ships_log, enemy_ships_log, sun_x_norm, sun_y_norm, sun_radius_norm]` |
 
 - 行星排序优先级：己方 → 敌方 → 距中心近
 - 舰队排序按 `(x, y)`
 - 不足 max 数量的用零填充
 - `is_comet` 标记彗星行星（沿轨道运行的临时行星），`is_inner` 标记内圈行星（距中心 < 50，可能被太阳摧毁）
+- 太阳特征分为全局常量和实体相对太阳几何量：行星追加相对太阳方向和净空，舰队追加前向投影、横向距离和射线净空。
 
 ---
 
@@ -422,7 +423,7 @@ Kaggle 环境
 OrbitWarsSelfPlayEnv
    ↓ raw obs (dict)
 encode_observation() [obs.py]
-   ↓ obs_vector (np.float32, 1110)
+   ↓ obs_vector (np.float32, 1449)
 ActorCriticGNN.forward()
    ↓ source_logits (20×48), slot_logits (20×201), value, ownership_mask
 select_sources() + ActionBuilder.build() + sample_action_sequence()
