@@ -47,7 +47,7 @@ class ActionSpaceConfig:
     max_sources: int = 16
     max_targets: int = 16
     ship_fractions: Tuple[float, ...] = (0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0)
-    ship_intercept: Tuple[float, ...] = (0,)
+    ship_intercepts: Tuple[float, ...] = (0,)
     max_launches_per_source: int = 3
 
     @property
@@ -78,11 +78,14 @@ class RewardConfig:
 
     # ── Economy mode: dense production advantage per step ──
     #     reward = (my_prod * log(my_prod) - enemy_prod * log(enemy_prod)) * scale
-    production_advantage_scale: float = 0.02
+    production_advantage_scale: float = 0.01
 
     # ── Economy mode: terminal fleet efficiency ──
     #     reward = my_fleets / total_board_production * scale
     terminal_economy_scale: float = 0.1
+
+    out_of_boundary_penalty_scale: float = 5e-4
+    suicide_penalty_scale: float = 1e-3
 
     # ── Legacy dense: planet-count advantage per step ──
     #     reward = (my_planets − enemy_planets) × scale

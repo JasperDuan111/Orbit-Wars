@@ -126,7 +126,7 @@ def compute_fleet_movement_and_collisions(
     n_fleets = len(fleet_shipses)
     n_planets = len(planet_ids)
 
-    remove_flags = np.zeros(n_fleets, dtype=np.bool_)
+    remove_flags = np.zeros(n_fleets, dtype=np.int8)
     hits_fleet_idx = np.empty(n_fleets, dtype=np.int32)
     hits_planet_id = np.empty(n_fleets, dtype=np.int32)
 
@@ -159,7 +159,7 @@ def compute_fleet_movement_and_collisions(
                 hits_fleet_idx[hit_count] = i
                 hits_planet_id[hit_count] = planet_ids[j]
                 hit_count += 1
-                remove_flags[i] = True
+                remove_flags[i] = 1
                 hit_planet = True
                 break
 
@@ -167,11 +167,11 @@ def compute_fleet_movement_and_collisions(
             continue
 
         if not (0 <= fleet_xs[i] <= BOARD_SIZE and 0 <= fleet_ys[i] <= BOARD_SIZE):
-            remove_flags[i] = True
+            remove_flags[i] = 2
             continue
 
         if point_to_segment_distance_square(CENTER, CENTER, old_x, old_y, fleet_xs[i], fleet_ys[i]) < SUN_RADIUS*SUN_RADIUS:
-            remove_flags[i] = True
+            remove_flags[i] = 3
             continue
 
     return remove_flags, hits_fleet_idx[:hit_count], hits_planet_id[:hit_count]
@@ -654,6 +654,7 @@ def interpreter(state, env):
         obs0["next_fleet_id"] = 0
         obs0["comets"] = []
         obs0["comet_planet_ids"] = []
+        obs0["rewards_helper"] = {}
 
         # Assign home planets — pick a random symmetric group of 4. Under
         # 4-fold rotational symmetry, every group's 4 copies are 90°
@@ -872,12 +873,21 @@ def interpreter(state, env):
         max_speed,
     )
 
+    out_of_boundary = 0
+    suicide = 0
     for i, fleet in enumerate(obs0["fleets"]):
-        if remove_flags[i]:
+        if (remove_flag := remove_flags[i]) != 0:
+            if remove_flag == 2:
+                out_of_boundary += 1
+            elif remove_flag == 3:
+                suicide += 1
             fleets_to_remove.append(fleet)
         else:
             fleet[2] = fleet_xs[i]
             fleet[3] = fleet_ys[i]
+    
+    obs0["rewards_helper"]["out_of_boundary"] = out_of_boundary
+    obs0["rewards_helper"]["suicide"] = suicide
 
     for fleet_idx, _pid in zip(hit_f_idx, hit_p_id):
         combat_lists[_pid].append(obs0["fleets"][fleet_idx])

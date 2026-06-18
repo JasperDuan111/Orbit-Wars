@@ -18,7 +18,7 @@ action:
   max_sources: 16
   max_targets: 16
   ship_fractions: [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]
-  ship_intercept: [0, 1, 2, 3, 4, 5]
+  ship_intercepts: [0, 1, 2, 3, 4]
   max_launches_per_source: 3
 
 model:
@@ -32,8 +32,10 @@ model:
 
 reward:
   fleet_advantage_scale: 1.0e-4      # economy: (my_fleets - enemy_fleets) per step
-  production_advantage_scale: 0.02   # economy: my_prod*log(my_prod) - enemy_prod*log(enemy_prod)
+  production_advantage_scale: 0.01   # economy: my_prod*log(my_prod) - enemy_prod*log(enemy_prod)
   terminal_economy_scale: 0.1        # economy terminal: my_fleets / total_board_production
+  out_of_boundary_penalty_scale: 5.0e-4
+  suicide_penalty_scale: 1.0e-3
   planet_count_scale: 0.03          # +0.03 per extra planet owned per step (was 0.02)
   territory_scale: 3.0              # base reward per capture / loss event
   production_weight: 0.5            # quality multiplier: 1 + prod × weight

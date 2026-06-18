@@ -108,6 +108,8 @@ class RewardCalculator:
         self.terminal_lose_scale: float = config.terminal_lose_scale
         self.launch_bonus_scale: float = config.launch_bonus_scale
         self.invalid_action_penalty: float = config.invalid_action_penalty
+        self.out_of_boundary_penalty_scale: float = config.out_of_boundary_penalty_scale
+        self.suicide_penalty_scale: float = config.suicide_penalty_scale
 
         # ── Per-episode tracking ──
         self._last_planet_owners: Optional[Dict[int, int]] = None
@@ -136,12 +138,16 @@ class RewardCalculator:
         """
         my_total, enemy_total = ship_totals(obs, player_id)
         diff = my_total - enemy_total
+        rewards_helper = obs["rewards_helper"]
+        out_of_boundary = rewards_helper["out_of_boundary"]
+        suicide = rewards_helper["suicide"]
 
         reward = 0.0
         if self.only_economy:
             reward += self._economy_fleet_advantage(my_total, enemy_total)
             reward += self._economy_production_advantage(obs, player_id)
             reward += self._economy_terminal(obs, player_id, my_total, is_done)
+            reward += self._wrong_action_penalty(out_of_boundary, suicide)
 
         # ── Persist ──
         self._last_planet_owners = planet_owner_map(obs)
@@ -154,6 +160,12 @@ class RewardCalculator:
 
     def _economy_fleet_advantage(self, my_total: float, enemy_total: float) -> float:
         return (my_total - enemy_total) * self.fleet_advantage_scale
+
+    def _wrong_action_penalty(self, out_of_boundary: int, suicide: int):
+        return - (
+            out_of_boundary * self.out_of_boundary_penalty_scale
+            + suicide * self.suicide_penalty_scale
+        )
 
     def _economy_production_advantage(self, obs, player_id: int) -> float:
         my_prod, enemy_prod = planet_production_totals(obs, player_id)
