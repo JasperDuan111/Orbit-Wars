@@ -35,7 +35,7 @@ reward:
   fleet_advantage_scale: 1.0e-4      # economy: (my_fleets - enemy_fleets) per step
   production_advantage_scale: 0.01   # economy: my_prod*log(my_prod) - enemy_prod*log(enemy_prod)
   terminal_economy_scale: 0.1        # economy terminal: my_fleets / total_board_production
-  out_of_boundary_penalty_scale: 1e-3
+  out_of_boundary_penalty_scale: 1.0e-3
   suicide_penalty_scale: 5.0e-3
   planet_count_scale: 0.03          # +0.03 per extra planet owned per step (was 0.02)
   territory_scale: 3.0              # base reward per capture / loss event
