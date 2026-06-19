@@ -5,7 +5,7 @@ from typing import Dict, Optional, Tuple
 
 from kaggle_environments.envs.orbit_wars.orbit_wars import Planet
 
-from .config import RewardConfig, DEFAULT_CONFIG
+from .config import EnvConfig, RewardConfig, DEFAULT_CONFIG
 from .obs import ship_totals
 
 
@@ -92,29 +92,28 @@ class RewardCalculator:
         my_total, enemy_total, diff, r = calc.compute(obs, player_id, done)
     """
 
-    def __init__(self, reward_config: Optional[RewardConfig] = None):
-        config = reward_config or DEFAULT_CONFIG.reward
-
+    def __init__(self, reward_config: RewardConfig = DEFAULT_CONFIG.reward, env_config: EnvConfig = DEFAULT_CONFIG.env):
         # ── Scales ──
-        self.fleet_advantage_scale: float = config.fleet_advantage_scale
-        self.production_advantage_scale: float = config.production_advantage_scale
-        self.terminal_economy_scale: float = config.terminal_economy_scale
-        self.planet_count_scale: float = config.planet_count_scale
-        self.territory_scale: float = config.territory_scale
-        self.production_weight: float = config.production_weight
-        self.neutral_capture_bonus: float = config.neutral_capture_bonus
-        self.idle_penalty_scale: float = config.idle_penalty_scale
-        self.terminal_win_scale: float = config.terminal_win_scale
-        self.terminal_lose_scale: float = config.terminal_lose_scale
-        self.launch_bonus_scale: float = config.launch_bonus_scale
-        self.invalid_action_penalty: float = config.invalid_action_penalty
-        self.out_of_boundary_penalty_scale: float = config.out_of_boundary_penalty_scale
-        self.suicide_penalty_scale: float = config.suicide_penalty_scale
+        self.fleet_advantage_scale: float = reward_config.fleet_advantage_scale
+        self.production_advantage_scale: float = reward_config.production_advantage_scale
+        self.terminal_economy_scale: float = reward_config.terminal_economy_scale
+        self.planet_count_scale: float = reward_config.planet_count_scale
+        self.territory_scale: float = reward_config.territory_scale
+        self.production_weight: float = reward_config.production_weight
+        self.neutral_capture_bonus: float = reward_config.neutral_capture_bonus
+        self.idle_penalty_scale: float = reward_config.idle_penalty_scale
+        self.terminal_win_scale: float = reward_config.terminal_win_scale
+        self.terminal_lose_scale: float = reward_config.terminal_lose_scale
+        self.launch_bonus_scale: float = reward_config.launch_bonus_scale
+        self.invalid_action_penalty: float = reward_config.invalid_action_penalty
+        self.out_of_boundary_penalty_scale: float = reward_config.out_of_boundary_penalty_scale
+        self.suicide_penalty_scale: float = reward_config.suicide_penalty_scale
+        self.only_economy = reward_config.only_economy
 
         # ── Per-episode tracking ──
         self._last_planet_owners: Optional[Dict[int, int]] = None
 
-        self.only_economy = config.only_economy
+        self.episode_steps = env_config.episode_steps
 
     # ------------------------------------------------------------------
     # Public API
@@ -178,7 +177,7 @@ class RewardCalculator:
         total_prod = total_planet_production(obs)
         if total_prod <= 0:
             return 0.0
-        return (my_total / total_prod) * self.terminal_economy_scale
+        return ((my_total / total_prod) - (self.episode_steps / 2)) * self.terminal_economy_scale
 
     # 1 ── Planet-count advantage  (per step, dense) ─────────────────
     def _planet_count_advantage(self, obs, player_id: int) -> float:

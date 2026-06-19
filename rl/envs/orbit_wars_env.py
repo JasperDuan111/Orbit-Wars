@@ -38,7 +38,7 @@ class OrbitWarsSelfPlayEnv:
         self._last_actions = None
         self._last_source_ships = None
         # ── Reward calculator (stateful, per-episode tracking) ──
-        self._reward_calc = RewardCalculator(reward_config)
+        self._reward_calc = RewardCalculator(reward_config, env_config)
         self.max_launches_per_source = action_config.max_launches_per_source
 
         opponent = opponent or NearestPlanetOpponent()
