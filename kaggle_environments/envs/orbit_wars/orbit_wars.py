@@ -878,9 +878,9 @@ def interpreter(state, env):
     for i, fleet in enumerate(obs0["fleets"]):
         if (remove_flag := remove_flags[i]) != 0:
             if remove_flag == 2:
-                out_of_boundary += 1
+                out_of_boundary += fleet[6]
             elif remove_flag == 3:
-                suicide += 1
+                suicide += fleet[6]
             fleets_to_remove.append(fleet)
         else:
             fleet[2] = fleet_xs[i]
