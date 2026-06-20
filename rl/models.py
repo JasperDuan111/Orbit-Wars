@@ -134,18 +134,57 @@ class ActorCriticGNN(nn.Module):
                 'proj': nn.Linear(out_dim, self.hg),
             }))
 
-        # 5. Per-slot source selection via learned query vectors
-        self.source_query = nn.Parameter(torch.randn(max_sources, self.hg) * 0.02)
+        # 5. Per-slot source selection — state-conditioned planet scoring.
+        #      Each planet gets an independent "quality" score from a small
+        #      MLP, so ships / production / position auto-steer attention.
+        #      Per-slot offsets add diversity across the 16 slots.
+        self.source_scorer = nn.Sequential(
+            nn.Linear(self.hg, self.hg),
+            nn.LayerNorm(self.hg),
+            nn.GELU(),
+            nn.Dropout(self.dropout),
+            nn.Linear(self.hg, 1),
+        )
+        self.source_slot_bias = nn.Parameter(
+            torch.randn(max_sources, self.hg) * 1.0
+        )
         self.source_key = nn.Linear(self.hg, self.hg, bias=False)
 
-        # 5b. Per-slot target scoring (separate from source — avoids
-        #      autograd graph conflict from multiple log_softmax calls)
-        self.target_query = nn.Parameter(torch.randn(max_sources, self.hg) * 0.02)
+        # Explicit ships-weight for source selection.
+        #   Simply biases source_logits toward planets with many ships,
+        #   giving an immediate inductive bias that survives early PPO
+        #   updates before the source_scorer MLP has converged.
+        self.register_buffer('source_ships_weight', torch.tensor(2.0))
 
-        # 6. Two-step action heads: STOP (independent) + fraction (target-dependent)
-        self.stop_head = nn.Linear(self.hg, 1)
-        with torch.no_grad():
-            self.stop_head.bias[0] = -1.0  # bias toward launching
+        # Sharper source attention — lower temperature makes slot_embs
+        #   and src_pos concentrate on the primary source planet rather
+        #   than a diluted average of all owned planets.
+        self.source_attn_temp = 0.5
+
+        # 5b. Per-slot target scoring — now source-conditioned:
+        #      target query is computed from slot_embs, and Zp is projected
+        #      through a separate target_key so source/target key spaces don't
+        #      interfere.  No autograd conflict because slot_embs is a computed
+        #      tensor, not a shared parameter.
+        #      Cosine similarity (L2-normalised) prevents embedding explosion.
+        self.target_query_proj = nn.Linear(self.hg, self.hg, bias=False)
+        self.target_key = nn.Linear(self.hg, self.hg, bias=False)
+        self.register_buffer('target_temperature', torch.tensor(3.0))
+
+        # 5c. Fixed target bias — makes "any target" slightly positive
+        #      by default, so the model explores different targets rather
+        #      than collapsing to STOP when embedding scores drift negative.
+        self.register_buffer('target_bias', torch.tensor(2.0))
+
+        # 5d. Fixed distance bias for target scoring.
+        #      Penalises far-away targets with a mild, constant weight.
+        self.register_buffer('target_distance_scale', torch.tensor(0.05))
+
+        # 6. STOP — learnable scalar threshold (not state-dependent).
+        #      A single global bias competes against all target scores.
+        #      The model can nudge it up/down through PPO, but because
+        #      it lacks per-slot information it won't drown out targets.
+        self.stop_bias = nn.Parameter(torch.tensor(-3.0))
 
         self.fraction_head = nn.Sequential(
             nn.Linear(self.hg * 2, self.hg),
@@ -192,6 +231,9 @@ class ActorCriticGNN(nn.Module):
         # Ownership mask (is_me is feature index 1)
         ownership_mask = Zp[:, :, 1] > 0.5  # (B, max_planets)
 
+        # Save raw planet positions before GCN transforms them
+        planet_pos = Zp[:, :, 4:6].clone()  # (B, N, 2) — x_norm, y_norm
+
         # -- 2. Planet GNN --
         Zp_t = self.Wa(Zp)
         Ag = torch.bmm(Zp_t, Zp_t.transpose(1, 2))
@@ -228,24 +270,53 @@ class ActorCriticGNN(nn.Module):
             Za = torch.bmm(attn_c, V)
             Zp = layer['proj'](Za) + Zp  # residual back to hg
 
-        # -- 5. Per-slot source selection via attention --
-        # slot_query: (1, max_sources, hg) → expand to (B, max_sources, hg)
-        Q_src = self.source_query.unsqueeze(0).expand(B, -1, -1)  # (B, max_sources, hg)
-        K_src = self.source_key(Zp)  # (B, max_planets, hg)
-        source_logits = torch.bmm(Q_src, K_src.transpose(1, 2)) / (self.hg ** 0.5)
+        # -- 5. Per-slot source selection via state-conditioned scoring --
+        #     planet_scores rates each planet independently via a small MLP
+        #     so that ships / production / position steer the attention.
+        planet_scores = self.source_scorer(Zp).squeeze(-1)          # (B, N)
+        K_src = self.source_key(Zp)                                  # (B, N, hg)
+        slot_offsets = (self.source_slot_bias.unsqueeze(0)           # (1, S, hg)
+                         @ K_src.transpose(1, 2))                    # (B, S, N)
+        slot_offsets = slot_offsets / (self.hg ** 0.5)
+        source_logits = planet_scores.unsqueeze(1) + slot_offsets    # (B, S, N)
 
-        # Target scores — independent dot-product attention with separate query
-        Q_tgt = self.target_query.unsqueeze(0).expand(B, -1, -1)  # (B, S, hg)
-        target_scores = torch.bmm(Q_tgt, Zp.transpose(1, 2)) / (self.hg ** 0.5)
-        # target_scores: (B, max_sources, max_planets)
- 
-        # -- 6. Slot embeddings + STOP head --
+        # Explicit ships bias — planets with more ships score higher
+        ships_feature = Zp[:, :, 7]                                    # (B, N) — ships_norm
+        source_logits = (source_logits
+                         + torch.abs(self.source_ships_weight)
+                         * ships_feature.unsqueeze(1))
+
+        # -- 6. Slot embeddings (source-conditioned) --
+        #     Sharper attention (temperature 0.5) → slot_embs and src_pos
+        #     concentrate on the primary source planet rather than a
+        #     diluted mix of all owned planets.
         src_mask = ownership_mask.unsqueeze(1).float()  # (B, 1, max_planets)
         src_attn = torch.softmax(
-            source_logits.masked_fill(src_mask == 0, float('-inf')), dim=-1
+            source_logits.masked_fill(src_mask == 0, float('-inf'))
+            / self.source_attn_temp,
+            dim=-1,
         ).nan_to_num(0)  # (B, max_sources, max_planets)
         slot_embs = torch.bmm(src_attn, Zp)  # (B, max_sources, hg)
-        stop_logits = self.stop_head(slot_embs)  # (B, max_sources, 1)
+
+        # -- 6b. Target scores via cosine similarity (bounded, safe) --
+        Q_tgt = self.target_query_proj(slot_embs)          # (B, S, hg)
+        K_tgt = self.target_key(Zp)                         # (B, N, hg)
+        Q_tgt = Q_tgt / (Q_tgt.norm(dim=-1, keepdim=True) + 1e-8)  # unit
+        K_tgt = K_tgt / (K_tgt.norm(dim=-1, keepdim=True) + 1e-8)  # unit
+        target_scores = (torch.bmm(Q_tgt, K_tgt.transpose(1, 2))
+                         * torch.abs(self.target_temperature))       # (B, S, N) in [-T, T]
+        target_scores = target_scores + self.target_bias  # (B, S, N) — positive baseline
+
+        # -- 6b-ii. Distance bias — penalise far-away targets --
+        #     Soft source position per slot (weighted by src_attn),
+        #     then Euclidean distance to every planet.
+        src_pos = torch.bmm(src_attn, planet_pos)            # (B, S, 2)
+        dist = torch.cdist(src_pos, planet_pos + 1e-8)       # (B, S, N) in [0, √2]
+        target_scores = (target_scores
+                         - torch.abs(self.target_distance_scale) * dist)
+
+        # -- 6c. STOP logit — learnable scalar, no slot dependency --
+        stop_logits = self.stop_bias.view(1, 1, 1).expand(B, self.max_sources, 1)
 
         # Fraction head is called per (source, chosen_target) later:
         #   frac_logits = fraction_head(cat([slot_embs[s], Zp[target_idx]]))

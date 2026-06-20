@@ -101,17 +101,19 @@ class RewardCalculator:
         self.territory_scale: float = reward_config.territory_scale
         self.production_weight: float = reward_config.production_weight
         self.neutral_capture_bonus: float = reward_config.neutral_capture_bonus
-        self.idle_penalty_scale: float = reward_config.idle_penalty_scale
+        self.no_action_penalty_scale: float = reward_config.no_action_penalty_scale
+        self.launch_bonus_scale: float = reward_config.launch_bonus_scale
         self.terminal_win_scale: float = reward_config.terminal_win_scale
         self.terminal_lose_scale: float = reward_config.terminal_lose_scale
-        self.launch_bonus_scale: float = reward_config.launch_bonus_scale
         self.invalid_action_penalty: float = reward_config.invalid_action_penalty
         self.out_of_boundary_penalty_scale: float = reward_config.out_of_boundary_penalty_scale
         self.suicide_penalty_scale: float = reward_config.suicide_penalty_scale
         self.only_economy = reward_config.only_economy
+        self.no_action_grace_steps: int = reward_config.no_action_grace_steps
 
         # ── Per-episode tracking ──
         self._last_planet_owners: Optional[Dict[int, int]] = None
+        self._idle_steps: int = 0
 
         self.episode_steps = env_config.episode_steps
 
@@ -122,9 +124,11 @@ class RewardCalculator:
     def reset(self, obs, player_id: int):
         """(Re-)initialise tracking state for a new episode."""
         self._last_planet_owners = planet_owner_map(obs)
+        self._idle_steps = 0
 
     def compute(
-        self, obs, player_id: int, is_done: bool, update_cont: int
+        self, obs, player_id: int, is_done: bool, update_cont: int,
+        launch_count: int = 0,
     ) -> Tuple[float, float, float, float]:
         """Compute the per-step reward.
 
@@ -143,10 +147,23 @@ class RewardCalculator:
 
         reward = 0.0
         if self.only_economy:
+            # ── Economy-only: learn to grow fleet & production ──
+            reward += self._launch_bonus(launch_count)
             reward += self._economy_fleet_advantage(my_total, enemy_total)
             reward += self._economy_production_advantage(obs, player_id)
-            reward += self._economy_terminal(obs, player_id, my_total, is_done)
             reward += self._wrong_action_penalty(out_of_boundary, suicide)
+            reward += self._no_action_penalty(launch_count)
+        else:
+            # ── Combat: map control + territory events + terminal ──
+            reward += self._launch_bonus(launch_count)
+            reward += self._economy_fleet_advantage(my_total, enemy_total)
+            reward += self._planet_count_advantage(obs, player_id)
+            reward += self._economy_production_advantage(obs, player_id)
+            reward += self._territory_change(obs, player_id)
+            reward += self._terminal_reward(diff, is_done)
+            reward += self._wrong_action_penalty(out_of_boundary, suicide)
+            reward += self._no_action_penalty(launch_count)
+    
 
         # ── Persist ──
         self._last_planet_owners = planet_owner_map(obs)
@@ -177,7 +194,7 @@ class RewardCalculator:
         total_prod = total_planet_production(obs)
         if total_prod <= 0:
             return 0.0
-        return ((my_total / total_prod) - (self.episode_steps / 2)) * self.terminal_economy_scale
+        return ((my_total / total_prod) - 0.5) * self.terminal_economy_scale
 
     # 1 ── Planet-count advantage  (per step, dense) ─────────────────
     def _planet_count_advantage(self, obs, player_id: int) -> float:
@@ -224,15 +241,29 @@ class RewardCalculator:
 
         return reward
 
-    # 3 ── Idle-ship penalty  (per step, dense) ─────────────────────
-    def _idle_penalty(self, obs, player_id: int) -> float:
-        """Penalise every idle ship.  No threshold — every parked ship
-        costs something, so the agent must always be launching.
+    def _no_action_penalty(self, launch_count: int) -> float:
+        """Penalise prolonged inaction — escalating.
 
-        Full idle (1.0) → −idle_penalty_scale per step.
+        After *no_action_grace_steps* consecutive idle steps the penalty
+        grows with idle duration, so the model cannot afford to sit still
+        indefinitely.
         """
-        idle = idle_ship_ratio(obs, player_id)
-        return -idle * self.idle_penalty_scale
+        if launch_count > 0:
+            self._idle_steps = 0
+            return 0.0
+        self._idle_steps += 1
+        if self._idle_steps <= self.no_action_grace_steps:
+            return 0.0
+        excess = self._idle_steps - self.no_action_grace_steps
+        return -self.no_action_penalty_scale * (1.0 + 0.1 * excess)
+
+    def _launch_bonus(self, launch_count: int) -> float:
+        """Immediate positive signal per fleet launch.
+
+        Fills the temporal gap between launching fleets and seeing
+        economic / territorial rewards, which may take tens of steps.
+        """
+        return launch_count * self.launch_bonus_scale
 
     # 4 ── Terminal reward ─────────────────────────────────────────
     def _terminal_reward(self, diff: float, is_done: bool) -> float:

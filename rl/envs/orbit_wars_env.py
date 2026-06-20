@@ -24,20 +24,16 @@ class OrbitWarsSelfPlayEnv:
         reward_config: RewardConfig = DEFAULT_CONFIG.reward,
         action_config: ActionSpaceConfig = DEFAULT_CONFIG.action,
     ):
-        configuration = {
-            "episodeSteps": env_config.episode_steps,
-            "actTimeout": env_config.act_timeout,
-        }
-        if env_config.seed is not None:
-            configuration["seed"] = env_config.seed
-        configuration["numPlayers"] = env_config.num_players
-        self._env = make("orbit_wars", configuration=structify(configuration), debug=env_config.debug)
+        self._episode_steps = env_config.episode_steps
+        self._act_timeout = env_config.act_timeout
+        self._debug = env_config.debug
+        self._next_seed = env_config.seed if env_config.seed is not None else 42
         self.num_players = env_config.num_players
+        self._env = None  # created on first reset()
         self.player_index = 0
         self._action_builder = ActionBuilder(action_config)
         self._last_actions = None
         self._last_source_ships = None
-        # ── Reward calculator (stateful, per-episode tracking) ──
         self._reward_calc = RewardCalculator(reward_config, env_config)
         self.max_launches_per_source = action_config.max_launches_per_source
 
@@ -82,12 +78,43 @@ class OrbitWarsSelfPlayEnv:
             self._opponents = [opponent] * (self.num_players - 1)
 
     def reset(self):
-        try:
-            self._env.reset(num_agents=self.num_players)
-        except TypeError:
-            self._env.reset()
+        # Advance seed so each episode gets a different planet layout.
+        self._next_seed += 10
+        self._env = make(
+            "orbit_wars",
+            configuration=structify({
+                "episodeSteps": self._episode_steps,
+                "actTimeout": self._act_timeout,
+                "seed": self._next_seed,
+                "numPlayers": self.num_players,
+            }),
+            debug=self._debug,
+        )
         obs = self._get_obs(self.player_index)
         player_id = _get_field(obs, "player", 0)
+
+        # Skip degenerate seeds
+        planets = [Planet(*p) for p in obs.get("planets", [])]
+        my_ships = sum(p.ships for p in planets if p.owner == player_id)
+        n_owned = sum(1 for p in planets if p.owner == player_id)
+        while (my_ships == 0 or n_owned == 0):
+            self._next_seed += 1
+            self._env = make(
+                "orbit_wars",
+                configuration=structify({
+                    "episodeSteps": self._episode_steps,
+                    "actTimeout": self._act_timeout,
+                    "seed": self._next_seed,
+                    "numPlayers": self.num_players,
+                }),
+                debug=self._debug,
+            )
+            obs = self._get_obs(self.player_index)
+            player_id = _get_field(obs, "player", 0)
+            planets = [Planet(*p) for p in obs.get("planets", [])]
+            my_ships = sum(p.ships for p in planets if p.owner == player_id)
+            n_owned = sum(1 for p in planets if p.owner == player_id)
+
         self._reward_calc.reset(obs, player_id)
         self._last_actions = None
         self._last_source_ships = None
@@ -104,7 +131,7 @@ class OrbitWarsSelfPlayEnv:
         player_id = _get_field(obs, "player", 0)
         my_action = my_action_override if my_action_override is not None else []
         my_action = my_action or []
-        my_action, invalid_count = self._sanitize_action(my_action, obs, player_id)
+        my_action, invalid_count, launch_count = self._sanitize_action(my_action, obs, player_id)
 
         actions: list[Any] = [None] * self.num_players
         actions[self.player_index] = my_action
@@ -125,7 +152,8 @@ class OrbitWarsSelfPlayEnv:
         self._env.step(actions)
 
         obs = self._get_obs(self.player_index)
-        my_total, enemy_total, diff, reward = self._compute_reward(obs, player_id, update_count)
+        my_total, enemy_total, diff, reward = self._compute_reward(
+            obs, player_id, update_count, launch_count)
 
         info = {
             "my_total": my_total,
@@ -135,9 +163,10 @@ class OrbitWarsSelfPlayEnv:
         }
         return obs, reward, self._is_done(), info
 
-    def _compute_reward(self, obs, player_id, update_count):
-        """Delegate to RewardCalculator.  Returns (my_total, enemy_total, diff, reward)."""
-        return self._reward_calc.compute(obs, player_id, self._is_done(), update_count)
+    def _compute_reward(self, obs, player_id, update_count, launch_count=0):
+        """Delegate to RewardCalculator."""
+        return self._reward_calc.compute(obs, player_id, self._is_done(),
+                                         update_count, launch_count)
 
     def _get_obs(self, index):
         return self._env.state[index]["observation"]
@@ -149,9 +178,9 @@ class OrbitWarsSelfPlayEnv:
 
     def _sanitize_action(self, action, obs, player_id):
         if not action:
-            return [], 0
+            return [], 0, 0
         if not isinstance(action, list):
-            return [], len(action) if hasattr(action, '__len__') else 1
+            return [], len(action) if hasattr(action, '__len__') else 1, 0
 
         raw_planets = obs.get("planets", []) if isinstance(obs, dict) else obs.planets
         planets = [Planet(*p) for p in raw_planets]
@@ -181,4 +210,4 @@ class OrbitWarsSelfPlayEnv:
             used[from_id] = used.get(from_id, 0) + ships
             clean.append([from_id, float(angle), ships])
 
-        return clean, invalid_count
+        return clean, invalid_count, len(clean)

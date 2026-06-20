@@ -6,3 +6,6 @@ runs/
 tmp/
 .vscode/
 log/
+checkpoints/
+replay.html
+model/

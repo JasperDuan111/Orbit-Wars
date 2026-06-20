@@ -10,6 +10,7 @@ Usage:
 
 import argparse
 import os
+import random
 import sys
 
 _project_root = os.path.dirname(os.path.abspath(__file__))
@@ -18,13 +19,14 @@ if _project_root not in sys.path:
 
 import torch
 
-from rl.action import ActionBuilder, sample_action_discrete, select_sources
+from rl.action import (ActionBuilder, sample_action_discrete,
+                        build_orbit_lookup)
 from rl.config import OrbitWarsConfig
 from rl.models import ActorCritic, ActorCriticGNN
 from rl.obs import encode_observation
 
 # ── Load config ──
-CONFIG_PATH = os.path.join(_project_root, "configs", "default.yaml")
+CONFIG_PATH = os.path.join(_project_root, "configs", "action_change.yaml")
 CONFIG = OrbitWarsConfig.from_yaml(CONFIG_PATH) if os.path.exists(CONFIG_PATH) else OrbitWarsConfig()
 
 # ── Device ──
@@ -79,28 +81,32 @@ def agent(obs):
     sg = sg.squeeze(0); tgt = tgt.squeeze(0); stop = stop.squeeze(0)
     frac = frac.squeeze(0); omask = omask.squeeze(0)
 
-    # 3. Select source planets
-    src_indices = select_sources(sg, omask, CONFIG.action.max_sources, deterministic=True)
+    # 3. Planet metadata
+    planets, my_idx, non_my_idx, player_id = ACTION_BUILDER.get_planet_data(obs)
+    planet_ships_dict = {
+        idx: planets[idx].ships
+        for idx in my_idx if planets[idx].owner == player_id
+    }
 
-    # 4. Planet metadata
-    planets, my_idx, non_my_idx, _ = ACTION_BUILDER.get_planet_data(obs)
-    if src_indices is not None:
-        ordered = [int(idx.item()) for idx in src_indices]
-    else:
-        ordered = my_idx[:CONFIG.action.max_sources]
-    ordered = ordered[:CONFIG.action.max_sources]
-    ships = [planets[si].ships if si < len(planets) else 0 for si in ordered]
+    # 3b. Orbit data for intercept-angle computation
+    orbit_lookup = build_orbit_lookup(obs)
+    angular_velocity = float(obs.get("angular_velocity", 0.0))
+    step = int(obs.get("step", 0))
 
-    # 5. Sample discrete actions (two-step: target → fraction)
-    action_indices, _, _ = sample_action_discrete(
+    # 4. Per-slot action sampling: source → target → fraction
+    action_indices, src_indices, _, _ = sample_action_discrete(
+        source_logits=sg, ownership_mask=omask,
         target_scores=tgt, stop_logits=stop, frac_logits_all=frac,
-        valid_targets=non_my_idx, source_ships=ships,
+        valid_targets=non_my_idx, planet_ships=planet_ships_dict,
         max_launches=MAX_LAUNCHES, deterministic=True,
         ship_fractions=CONFIG.action.ship_fractions,
+        planets=planets,
     )
 
-    # 6. Decode to moves
-    return ACTION_BUILDER.decode_all(planets, action_indices, ordered, ships, non_my_idx)
+    # 5. Decode to moves (with intercept angle)
+    return ACTION_BUILDER.decode_all(
+        planets, action_indices, src_indices, planet_ships_dict, non_my_idx,
+        orbit_lookup=orbit_lookup, angular_velocity=angular_velocity, step=step)
 
 
 # ── CLI ──
@@ -163,6 +169,11 @@ def main():
     else:
         opp_agent = agent
 
+    # if random.random() < 0.5:
+    #     agent, opp_agent = opp_agent, agent
+    #     print("Playing as Player 1 (bottom-right)")
+    # else:        
+    #     print("Playing as Player 0 (top-left)")
     env.run([agent, opp_agent])
 
     for i, state in enumerate(env.steps[-1]):

@@ -7,7 +7,7 @@ import numpy as np
 import torch
 from kaggle_environments.envs.orbit_wars.orbit_wars import CENTER, Planet, ROTATION_RADIUS_LIMIT
 from .action import (ActionBuilder, sample_action_discrete,
-                        select_sources, source_selection_logprob)
+                        build_orbit_lookup)
 from .config import ActionSpaceConfig, DEFAULT_CONFIG, GameConfig, ObsConfig
 from .obs import encode_observation
 from .models import ActorCritic
@@ -112,24 +112,29 @@ class PolicyOpponent:
             sg = sg.squeeze(0); tgt = tgt.squeeze(0); stop = stop.squeeze(0)
             frac = frac.squeeze(0); omask = omask.squeeze(0)
 
-        src_indices = select_sources(
-            sg, omask, self.action_config.max_sources, deterministic=True,
-        )
-        planets, my_idx, non_my_idx, _ = self._action_builder.get_planet_data(obs)
-        if src_indices is not None:
-            ordered = [int(idx.item()) for idx in src_indices]
-        else:
-            ordered = my_idx[:self.action_config.max_sources]
-        ordered = ordered[:self.action_config.max_sources]
-        ships = [planets[si].ships if si < len(planets) else 0 for si in ordered]
+        planets, my_idx, non_my_idx, player_id = self._action_builder.get_planet_data(obs)
+        planet_ships_dict = {
+            idx: planets[idx].ships
+            for idx in my_idx if planets[idx].owner == player_id
+        }
 
-        action_indices, _, _ = sample_action_discrete(
+        orbit_lookup = build_orbit_lookup(obs)
+        angular_velocity = float(obs.get("angular_velocity", 0.0))
+        step = int(obs.get("step", 0))
+
+        action_indices, src_indices, _, _ = sample_action_discrete(
+            source_logits=sg, ownership_mask=omask,
             target_scores=tgt, stop_logits=stop, frac_logits_all=frac,
-            valid_targets=non_my_idx, source_ships=ships,
+            valid_targets=non_my_idx, planet_ships=planet_ships_dict,
             max_launches=self.action_config.max_launches_per_source,
             deterministic=True, ship_fractions=self.action_config.ship_fractions,
+            planets=planets,
         )
-        return self._action_builder.decode_all(planets, action_indices, ordered, ships, non_my_idx)
+        return self._action_builder.decode_all(
+            planets, action_indices, src_indices, planet_ships_dict, non_my_idx,
+            orbit_lookup=orbit_lookup,
+            angular_velocity=angular_velocity,
+            step=step)
 
     @staticmethod
     def batch_act(opponents_with_obs, device, action_config=None, obs_config=None,
@@ -166,25 +171,28 @@ class PolicyOpponent:
 
             for i, idx in enumerate(indices):
                 _, obs = opponents_with_obs[idx]
-                src_indices = select_sources(
-                    sg_b[i], omask_b[i], action_config.max_sources, deterministic=True,
-                )
-                pbi, my_i, non_i, _ = first._action_builder.get_planet_data(obs)
-                if src_indices is not None:
-                    ordered = [int(x.item()) for x in src_indices]
-                else:
-                    ordered = my_i[:action_config.max_sources]
-                ordered = ordered[:action_config.max_sources]
-                ships = [pbi[si].ships if si < len(pbi) else 0 for si in ordered]
+                pbi, my_i, non_i, player_id = first._action_builder.get_planet_data(obs)
+                planet_ships_dict = {
+                    pi: pbi[pi].ships
+                    for pi in my_i if pbi[pi].owner == player_id
+                }
 
-                acts, _, _ = sample_action_discrete(
+                ol = build_orbit_lookup(obs)
+                av = float(obs.get("angular_velocity", 0.0))
+                st = int(obs.get("step", 0))
+
+                acts, src_i, _, _ = sample_action_discrete(
+                    source_logits=sg_b[i], ownership_mask=omask_b[i],
                     target_scores=tgt_b[i], stop_logits=stop_b[i],
                     frac_logits_all=frac_b[i],
-                    valid_targets=non_i, source_ships=ships,
+                    valid_targets=non_i, planet_ships=planet_ships_dict,
                     max_launches=max_launches,
                     deterministic=True, ship_fractions=action_config.ship_fractions,
+                    planets=pbi,
                 )
-                results[idx] = first._action_builder.decode_all(pbi, acts, ordered, ships, non_i)
+                results[idx] = first._action_builder.decode_all(
+                    pbi, acts, src_i, planet_ships_dict, non_i,
+                    orbit_lookup=ol, angular_velocity=av, step=st)
 
         return results
 
@@ -246,12 +254,16 @@ class OpponentPool:
         pure random sender, or the built-in ``starter`` agent.
         """
         if only_economy:
-            return DoNothingOpponent()
+            return random.choice([
+                DoNothingOpponent(),
+                RandomOpponent(),
+            ])
 
         if not self._policy_instances or (rule_prob > 0 and random.random() < rule_prob):
             return random.choice([
                 NearestPlanetOpponent(),
-                RandomOpponent(),
+                DoNothingOpponent(),
+                RandomOpponent(),                
                 RuleBasedStarter(),
             ])
 

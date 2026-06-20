@@ -50,6 +50,7 @@ class ActionSpaceConfig:
     ship_fractions: Tuple[float, ...] = (0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0)
     ship_intercepts: Tuple[float, ...] = (0,)
     max_launches_per_source: int = 3
+    epsilon: float = 0.1                     # ε-greedy exploration rate (0 = pure argmax, 1 = pure random)
 
     @property
     def actions_per_source(self) -> int:
@@ -97,15 +98,16 @@ class RewardConfig:
     production_weight: float = 0.5            # quality multiplier: 1 + prod × weight
     neutral_capture_bonus: float = 2.0        # extra multiplier for neutral captures (3× total)
 
-    # ── Idle-ship penalty  (fires from 0 %, no threshold) ──
-    idle_penalty_scale: float = 0.15          # −0.15 / step at full idle
+    # ── No-action penalty: applied when 0 launches in a step ──
+    no_action_penalty_scale: float = 0.03   # penalty per idle step after grace
+    no_action_grace_steps: int = 5          # consecutive idle steps before penalty
+
+    # ── Launch bonus: immediate positive signal per launch ──
+    launch_bonus_scale: float = 0.03        # +0.03 per launch — breaks inaction trap
 
     # ── Terminal  (asymmetric) ──
     terminal_win_scale: float = 15.0
     terminal_lose_scale: float = -15.0
-
-    # ── Launch bonus: small reward per fleet launch (applied in env.step) ──
-    launch_bonus_scale: float = 0.03           # +0.03 per valid launch; breaks STOP deadlock
 
     # ── Invalid-action penalty (applied by env wrapper) ──
     invalid_action_penalty: float = 0.1

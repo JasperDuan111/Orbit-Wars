@@ -13,7 +13,7 @@ from torch.utils.tensorboard import SummaryWriter
 from kaggle_environments.utils import Struct
 
 from .action import (ActionBuilder, sample_action_discrete,
-                        select_sources, source_selection_logprob)
+                        build_orbit_lookup, _get_field)
 from .config import OrbitWarsConfig
 from .envs.orbit_wars_env import OrbitWarsSelfPlayEnv
 from .models import ActorCritic, ActorCriticGNN
@@ -153,11 +153,13 @@ def main():
     )
     writer = SummaryWriter(log_dir=tb_log_dir)
 
-    # Create envs
+    # Create envs — fixed initial seed from config, +1 per episode.
+    # Reproducible: same config seed → same sequence of planet layouts.
+    base_seed = config.train.seed
     envs = [
         OrbitWarsSelfPlayEnv(
             opponent=NearestPlanetOpponent(),
-            env_config=replace(config.env, seed=config.train.seed + i),
+            env_config=replace(config.env, seed=base_seed + i),
             reward_config=config.reward,
             action_config=config.action,
         )
@@ -320,6 +322,7 @@ def main():
                 valid_targets_snapshots = []
                 ships_snapshots = []
                 source_indices_snapshots = []
+                planets_snapshots = []
 
                 action_builder = ActionBuilder(config.action)
 
@@ -328,51 +331,65 @@ def main():
                     planets, my_idx, non_my_idx, player_id = \
                         action_builder.get_planet_data(obs_list[i])
 
-                    # 2. Select source planets
-                    src_indices = select_sources(
-                        source_logits[i], ownership_masks[i],
-                        config.action.max_sources, deterministic=False,
-                    )
-                    if src_indices is not None:
-                        ordered_sources = [int(idx.item()) for idx in src_indices]
-                    else:
-                        ordered_sources = my_idx[:config.action.max_sources]
-                    ordered_sources = ordered_sources[:config.action.max_sources]
+                    # 1b. Orbit data for intercept-angle computation
+                    orbit_lookup = build_orbit_lookup(obs_list[i])
+                    angular_velocity = float(
+                        _get_field(obs_list[i], "angular_velocity", 0.0))
+                    step = int(_get_field(obs_list[i], "step", 0))
 
-                    src_ship_list = [
-                        planets[si].ships if si < len(planets)
-                        and planets[si].owner == player_id else 0
-                        for si in ordered_sources
-                    ]
-
-                    # 3. Two-step sampling: target → fraction
-                    action_indices, slot_lp, _ = sample_action_discrete(
+                    # 2. Per-slot action sampling: source → target → fraction
+                    #    Build {planet_idx: ships} for all owned planets
+                    planet_ships_dict = {
+                        idx: planets[idx].ships
+                        for idx in my_idx if planets[idx].owner == player_id
+                    }
+                    action_indices, src_indices, lp_val, _ = sample_action_discrete(
+                        source_logits=source_logits[i],
+                        ownership_mask=ownership_masks[i],
                         target_scores=target_scores[i],
                         stop_logits=stop_logits[i],
                         frac_logits_all=frac_logits_all[i],
                         valid_targets=non_my_idx,
-                        source_ships=src_ship_list,
+                        planet_ships=planet_ships_dict,
                         max_launches=config.action.max_launches_per_source,
                         deterministic=False,
                         ship_fractions=config.action.ship_fractions,
-                    )
-                    # 4. Source-selection logprob
-                    src_lp = source_selection_logprob(
-                        source_logits[i], ownership_masks[i], src_indices,
+                        epsilon=config.action.epsilon,
+                        planets=planets,
                     )
                     actions_batch[i] = action_indices
-                    logprobs_batch[i] = src_lp + slot_lp
+                    logprobs_batch[i] = lp_val
 
-                    # 5. Decode to moves
+                    # 3. Decode to moves (intercept angle + sun collision)
                     my_moves = action_builder.decode_all(
                         planets, action_indices,
-                        ordered_sources, src_ship_list, non_my_idx,
+                        src_indices, planet_ships_dict, non_my_idx,
+                        orbit_lookup=orbit_lookup,
+                        angular_velocity=angular_velocity,
+                        step=step,
                     )
+
+                    # ── diagnostic: first env, first step of each update ──
+                    if i == 0 and roll == 0 and update % 1 == 0:
+                        n_own = int(ownership_masks[0].sum().item())
+                        stop_v = float(stop_logits[0, 0].item())
+                        tgt_max = float(target_scores[0].max().item())
+                        tgt_min = float(target_scores[0].min().item())
+                        src_list = [int(src_indices[s].item()) for s in range(min(5, len(src_indices)))]
+                        src_ships = {s: planet_ships_dict.get(s, 0) for s in src_list}
+                        tgt00 = int(action_indices[0, 0, 0].item())
+                        tgt01 = int(action_indices[0, 0, 1].item()) if action_indices.shape[2] > 1 else -1
+                        print(f"[diag] upd={update} step={step} n_own={n_own} "
+                              f"stop={stop_v:.2f} tgt_max={tgt_max:.2f} tgt_min={tgt_min:.2f} "
+                              f"srcs={src_list} ships={src_ships} "
+                              f"tgt_cat0={tgt00} frac0={tgt01} "
+                              f"moves={len(my_moves)} lp={lp_val:.3f}")
 
                     obs_snapshots.append(dict(obs_list[i]))
                     valid_targets_snapshots.append(non_my_idx)
-                    ships_snapshots.append(src_ship_list)
+                    ships_snapshots.append(planet_ships_dict)
                     source_indices_snapshots.append(src_indices)
+                    planets_snapshots.append(planets)
 
                     # 6. Step env
                     next_obs, reward, done, _info = env.step(
@@ -382,11 +399,16 @@ def main():
                         update_count = update,
                     )
                     rewards[i] = reward
-                    dones[i] = float(done)
 
-                    if done:
+                    n_own_next = sum(
+                        1 for p in next_obs.get("planets", [])
+                        if p[1] == player_id)
+                    if done or n_own_next == 0:
+                        dones[i] = 1.0
                         env.set_opponent(pool.sample(config.reward.only_economy, rule_prob=config.train.opponent_rule_prob))
                         next_obs = env.reset()
+                    else:
+                        dones[i] = float(done)
 
                     next_obs_list.append(next_obs)
 
@@ -401,6 +423,8 @@ def main():
                     valid_targets_list=valid_targets_snapshots,
                     source_ships_list=ships_snapshots,
                     source_indices_list=source_indices_snapshots,
+                    planet_ships_list=ships_snapshots,
+                    planets_list=planets_snapshots,
                 )
 
                 obs_list = next_obs_list
