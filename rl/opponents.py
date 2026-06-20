@@ -129,6 +129,9 @@ class PolicyOpponent:
             max_launches=self.action_config.max_launches_per_source,
             deterministic=True, ship_fractions=self.action_config.ship_fractions,
             planets=planets,
+            orbit_lookup=orbit_lookup,
+            angular_velocity=angular_velocity,
+            step=step,
         )
         return self._action_builder.decode_all(
             planets, action_indices, src_indices, planet_ships_dict, non_my_idx,
@@ -189,6 +192,7 @@ class PolicyOpponent:
                     max_launches=max_launches,
                     deterministic=True, ship_fractions=action_config.ship_fractions,
                     planets=pbi,
+                    orbit_lookup=ol, angular_velocity=av, step=st,
                 )
                 results[idx] = first._action_builder.decode_all(
                     pbi, acts, src_i, planet_ships_dict, non_i,

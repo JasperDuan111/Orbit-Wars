@@ -124,16 +124,23 @@ def compute_intercept_angle(
     orbit_lookup: dict,
     angular_velocity: float,
     step: int,
-) -> float:
+    return_pos: bool = False,
+):
     """Compute firing angle to intercept a (possibly orbiting) target.
 
     For static planets the angle is simply the bearing to the current
     position.  For rotating planets an iterative predictor–corrector
     loop (max 10 iterations) converges on the intercept angle.
+
+    When ``return_pos`` is True, also returns ``(future_tx, future_ty)``
+    — the cartesian coordinates of the predicted intercept point.  This
+    allows ``trajectory_hits_sun`` to correctly judge whether the fleet
+    passes through the sun *before* reaching the actual intercept point.
     """
     info = orbit_lookup.get(tgt_id) if orbit_lookup else None
     if info is None or not info['rotates'] or angular_velocity == 0:
-        return math.atan2(tgt_y - src_y, tgt_x - src_x)
+        angle = math.atan2(tgt_y - src_y, tgt_x - src_x)
+        return (angle, tgt_x, tgt_y) if return_pos else angle
 
     r = info['orbital_r']
     cx, cy = _SUN_CENTER
@@ -161,7 +168,7 @@ def compute_intercept_angle(
         angle = new_angle
         cur_tx, cur_ty = future_tx, future_ty
 
-    return angle
+    return (angle, future_tx, future_ty) if return_pos else angle
 
 
 class ActionBuilder:
@@ -197,19 +204,23 @@ class ActionBuilder:
         frac = self.ship_fractions[frac_idx]
         ships = max(1, min(int(remaining * frac), remaining))
 
-        # Intercept angle: compensate for target orbital motion
+        # Intercept angle: compensate for target orbital motion.
+        # Also retrieve the predicted intercept point so that the sun
+        # collision check uses the *actual* arrival position, not the
+        # target's current coordinates.
         speed = _fleet_speed(ships)
-        angle = compute_intercept_angle(
+        angle, fut_x, fut_y = compute_intercept_angle(
             src_x=src.x, src_y=src.y,
             tgt_id=tgt.id, tgt_x=tgt.x, tgt_y=tgt.y,
             fleet_speed=speed,
             orbit_lookup=orbit_lookup or {},
             angular_velocity=angular_velocity,
             step=step,
+            return_pos=True,
         )
 
         if trajectory_hits_sun(src.x, src.y, angle=angle,
-                                tgt_x=tgt.x, tgt_y=tgt.y):
+                                tgt_x=fut_x, tgt_y=fut_y):
             return None
         return [src.id, angle, ships]
 
@@ -316,18 +327,20 @@ def sample_action_discrete(
     ship_fractions,
     epsilon=0.1,
     planets=None,          # list of Planet objects (for sun collision)
+    orbit_lookup=None,     # {planet_id: {orbital_r, initial_angle, rotates}} — for intercept
+    angular_velocity=0.0,  # radians per step
+    step=0,                # current game step
 ):
     """Per-slot action sampling: source → target → fraction.
 
     ε-greedy exploration: random uniform with prob ε, argmax with prob 1-ε.
     Logprobs always use the model's softmax distribution.
     Ships are only consumed when the trajectory does NOT hit the sun,
-    matching the actual execution in ``decode_all``.
+    matching the actual execution in ``decode_all`` (intercept angle
+    + future target position for correct rotating-target sun check).
 
-    **Sequential source masking**: a planet is masked from subsequent slots
-    when its remaining ships drop below 15% of its original count.  This
-    prevents all slots from draining a single planet while allowing
-    meaningful multi-slot use of a large source.
+    **Sequential source masking**: once a planet is selected by a previous
+    slot it is masked from all subsequent slots, forcing slot diversity.
 
     Returns
     -------
@@ -342,7 +355,6 @@ def sample_action_discrete(
     n_fracs = len(ship_fractions)
     eps = 0.0 if deterministic else epsilon
     fill_val = float('-inf')
-    _DRAIN_THRESHOLD = 0.15  # mask source when remaining < 15% of original
 
     action_indices = torch.zeros((S, L, 2), dtype=torch.long, device=device)
     source_indices = torch.zeros(S, dtype=torch.long, device=device)
@@ -377,31 +389,25 @@ def sample_action_discrete(
         if n_owned == 0:
             continue
 
-        # ── 0. Build drain mask: planets drained below threshold by prior slots ──
-        drain_mask = torch.zeros(N, dtype=torch.bool, device=device)
+        # ── 0. Mask planets already selected by previous slots ──
+        used_mask = torch.zeros(N, dtype=torch.bool, device=device)
         for prev_s in range(s):
-            prev_si = source_indices[prev_s].item()
-            initial = planet_ships.get(prev_si, 0)
-            if initial <= 0:
-                continue
-            rem = remaining_ships.get(prev_si, 0)
-            if rem < initial * _DRAIN_THRESHOLD:
-                drain_mask[prev_si] = True
+            used_mask[source_indices[prev_s]] = True
 
         # ── 1. Source logprobs & entropy for THIS slot (recomputed) ──
-        src_s = src_base[s].masked_fill(drain_mask, fill_val)
+        src_s = src_base[s].masked_fill(used_mask, fill_val)
         src_logp_s = src_s.log_softmax(dim=-1).nan_to_num(0.0)
         safe_src_s = src_logp_s.masked_fill(src_logp_s == fill_val, 0.0)
         src_ent_s = -(safe_src_s.exp() * safe_src_s).sum(dim=-1)
 
         # ── 2. Source selection ──
         #     If all owned planets are drained, stop assigning slots.
-        n_avail_source = (~drain_mask[owned_idx]).sum().item() if n_owned > 0 else 0
+        n_avail_source = (~used_mask[owned_idx]).sum().item() if n_owned > 0 else 0
         if n_avail_source == 0:
             break
 
         if eps > 0 and rand_source[s].item() < eps:
-            avail = owned_idx[~drain_mask[owned_idx]]
+            avail = owned_idx[~used_mask[owned_idx]]
             src_idx = int(avail[rand_source_int[s].item() % len(avail)].item())
         else:
             src_idx = int(torch.argmax(src_s).item())
@@ -452,13 +458,23 @@ def sample_action_discrete(
             _f = ship_fractions[fa]
             ships = max(1, min(int(rem * _f), rem))
 
-            # Sun collision guard — must use the *same intercept angle*
-            # that ``decode`` will use.  Otherwise a launch that passes
-            # the check here may still be cancelled in ``decode`` (or
-            # vice-versa), causing mismatched ship counts.
+            # Sun collision guard — use intercept angle + future target
+            # position, matching ``decode()`` exactly so that ship
+            # consumption in sampling and replay stays consistent.
             if planets is not None and src_p is not None:
                 tgt_p = planets[real_tgt_idx]
-                if trajectory_hits_sun(src_p.x, src_p.y, tgt_x=tgt_p.x, tgt_y=tgt_p.y):
+                speed = _fleet_speed(ships)
+                int_angle, fut_x, fut_y = compute_intercept_angle(
+                    src_x=src_p.x, src_y=src_p.y,
+                    tgt_id=tgt_p.id, tgt_x=tgt_p.x, tgt_y=tgt_p.y,
+                    fleet_speed=speed,
+                    orbit_lookup=orbit_lookup or {},
+                    angular_velocity=angular_velocity,
+                    step=step,
+                    return_pos=True,
+                )
+                if trajectory_hits_sun(src_p.x, src_p.y, angle=int_angle,
+                                        tgt_x=fut_x, tgt_y=fut_y):
                     continue  # ← keeps `rem` unchanged, ll still advances
 
             rem -= ships
@@ -485,25 +501,28 @@ def logprob_batched_combined(
     max_launches,
     ship_fractions,
     all_planets=None,          # list of Planet lists (for sun collision; optional)
+    all_orbit_lookups=None,    # list of orbit lookup dicts
+    all_steps=None,            # list of int steps
+    all_ang_vels=None,         # list of float angular_velocities
 ):
     """Batched log-probability + entropy for PPO update.
 
     Ship consumption during replay matches actual execution:
-    sun-colliding launches do NOT consume ships.
+    sun-colliding launches do NOT consume ships, using the same
+    intercept-angle + future-position sun check as ``decode()``.
 
-    Source logprobs are recomputed per-slot with sequential drain
-    masking (15% threshold), matching the behaviour of ``sample_action_discrete``.
+    Source logprobs are recomputed per-slot with sequential used
+    masking, matching the behaviour of ``sample_action_discrete``.
     """
     B, S, N = tgt_scores.shape
     L = max_launches
     device = tgt_scores.device
     fill_val = float('-inf')
-    _DRAIN_THRESHOLD = 0.15
 
     src_idx_batch = torch.stack(source_indices, dim=0).to(device)  # (B, S)
     src_base = src_logits.masked_fill(~ownership_mask.unsqueeze(1), fill_val)  # (B, S, N)
 
-    # ── 1. Source logprob & entropy — per-slot with sequential drain ──
+    # ── 1. Source logprob & entropy — per-slot with sequential used mask ──
     src_lps = torch.zeros(B, device=device)
     src_ents = torch.zeros(B, device=device)
 
@@ -532,30 +551,24 @@ def logprob_batched_combined(
 
     for b in range(B):
         valid = all_valid_targets[b]
-        ships_initial = dict(all_planet_ships[b])     # immutable — used for drain threshold
-        remaining = dict(all_planet_ships[b])          # mutable — tracks consumption
+        remaining = dict(all_planet_ships[b])              # mutable — tracks consumption
         act_b = action_indices[b]                            # (S, L, 2)
         tgt_cats = act_b[:, :, 0]                            # (S, L)
         frac_idxs = act_b[:, :, 1]                           # (S, L)
         planets = all_planets[b] if all_planets else None
 
         for s in range(S):
-            # ── 0. Source logprob with sequential drain mask ──
-            drain_mask = torch.zeros(N, dtype=torch.bool, device=device)
+            # ── 0. Mask planets already selected by previous slots ──
+            used_mask = torch.zeros(N, dtype=torch.bool, device=device)
             for prev_s in range(s):
-                prev_si = src_idx_batch[b, prev_s].item()
-                initial = ships_initial.get(prev_si, 0)
-                if initial <= 0:
-                    continue
-                if remaining.get(prev_si, 0) < initial * _DRAIN_THRESHOLD:
-                    drain_mask[prev_si] = True
+                used_mask[src_idx_batch[b, prev_s]] = True
 
-            # ── All sources drained → stop (matches sampling behaviour) ──
-            owned_avail = (ownership_mask[b] & ~drain_mask).sum().item()
+            # ── All sources used → stop (matches sampling behaviour) ──
+            owned_avail = (ownership_mask[b] & ~used_mask).sum().item()
             if owned_avail == 0:
                 break
 
-            src_bs = src_base[b, s].masked_fill(drain_mask, fill_val)
+            src_bs = src_base[b, s].masked_fill(used_mask, fill_val)
             src_logp_bs = src_bs.log_softmax(dim=-1).nan_to_num(0.0)
             safe_src_bs = src_logp_bs.masked_fill(src_logp_bs == fill_val, 0.0)
             src_ents[b] += -(safe_src_bs.exp() * safe_src_bs).sum()
@@ -589,10 +602,25 @@ def logprob_batched_combined(
                 _f = ship_fractions[fi]
                 ships = max(1, min(int(rem * _f), rem))
 
-                # Sun collision guard — match decode_all behaviour
+                # Sun collision guard — use intercept angle + future
+                # target position, matching ``decode()`` exactly.
                 if planets is not None and src_p is not None:
                     tgt_p = planets[ti]
-                    if trajectory_hits_sun(src_p.x, src_p.y, tgt_x=tgt_p.x, tgt_y=tgt_p.y):
+                    speed = _fleet_speed(ships)
+                    ol = all_orbit_lookups[b] if all_orbit_lookups else {}
+                    _av = all_ang_vels[b] if all_ang_vels else 0.0
+                    _st = all_steps[b] if all_steps else 0
+                    int_angle, fut_x, fut_y = compute_intercept_angle(
+                        src_x=src_p.x, src_y=src_p.y,
+                        tgt_id=tgt_p.id, tgt_x=tgt_p.x, tgt_y=tgt_p.y,
+                        fleet_speed=speed,
+                        orbit_lookup=ol,
+                        angular_velocity=_av,
+                        step=_st,
+                        return_pos=True,
+                    )
+                    if trajectory_hits_sun(src_p.x, src_p.y, angle=int_angle,
+                                            tgt_x=fut_x, tgt_y=fut_y):
                         continue  # no ship consumption
 
                 rem -= ships

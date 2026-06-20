@@ -169,12 +169,13 @@ def main():
     else:
         opp_agent = agent
 
-    # if random.random() < 0.5:
-    #     agent, opp_agent = opp_agent, agent
-    #     print("Playing as Player 1 (bottom-right)")
-    # else:        
-    #     print("Playing as Player 0 (top-left)")
-    env.run([agent, opp_agent])
+    if random.random() < 0.5:
+        player0, player1 = opp_agent, agent
+        print("Playing as Player 1 (bottom-right)")
+    else:
+        player0, player1 = agent, opp_agent
+        print("Playing as Player 0 (top-left)")
+    env.run([player0, player1])
 
     for i, state in enumerate(env.steps[-1]):
         print(f"Player {i}: reward={state.reward}, status={state.status}")

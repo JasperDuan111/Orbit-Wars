@@ -323,6 +323,9 @@ def main():
                 ships_snapshots = []
                 source_indices_snapshots = []
                 planets_snapshots = []
+                orbit_snapshots = []
+                step_snapshots = []
+                ang_vel_snapshots = []
 
                 action_builder = ActionBuilder(config.action)
 
@@ -356,6 +359,9 @@ def main():
                         ship_fractions=config.action.ship_fractions,
                         epsilon=config.action.epsilon,
                         planets=planets,
+                        orbit_lookup=orbit_lookup,
+                        angular_velocity=angular_velocity,
+                        step=step,
                     )
                     actions_batch[i] = action_indices
                     logprobs_batch[i] = lp_val
@@ -379,11 +385,15 @@ def main():
                         src_ships = {s: planet_ships_dict.get(s, 0) for s in src_list}
                         tgt00 = int(action_indices[0, 0, 0].item())
                         tgt01 = int(action_indices[0, 0, 1].item()) if action_indices.shape[2] > 1 else -1
-                        print(f"[diag] upd={update} step={step} n_own={n_own} "
+                        print(f"[diag] upd={update} step={step} pid={player_id} n_own={n_own} "
                               f"stop={stop_v:.2f} tgt_max={tgt_max:.2f} tgt_min={tgt_min:.2f} "
                               f"srcs={src_list} ships={src_ships} "
                               f"tgt_cat0={tgt00} frac0={tgt01} "
                               f"moves={len(my_moves)} lp={lp_val:.3f}")
+
+                    orbit_snapshots.append(orbit_lookup)
+                    step_snapshots.append(step)
+                    ang_vel_snapshots.append(angular_velocity)
 
                     obs_snapshots.append(dict(obs_list[i]))
                     valid_targets_snapshots.append(non_my_idx)
@@ -425,6 +435,9 @@ def main():
                     source_indices_list=source_indices_snapshots,
                     planet_ships_list=ships_snapshots,
                     planets_list=planets_snapshots,
+                    orbit_lookups_list=orbit_snapshots,
+                    steps_list=step_snapshots,
+                    ang_vels_list=ang_vel_snapshots,
                 )
 
                 obs_list = next_obs_list

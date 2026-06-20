@@ -677,6 +677,7 @@ def interpreter(state, env):
         for i in range(num_agents):
             state[i]["observation"].player = i
             if i > 0:
+                state[i]["observation"]["step"] = obs0["step"]
                 state[i]["observation"]["angular_velocity"] = obs0["angular_velocity"]
                 state[i]["observation"]["planets"] = obs0["planets"]
                 state[i]["observation"]["initial_planets"] = obs0["initial_planets"]
@@ -684,6 +685,7 @@ def interpreter(state, env):
                 state[i]["observation"]["next_fleet_id"] = obs0["next_fleet_id"]
                 state[i]["observation"]["comets"] = obs0["comets"]
                 state[i]["observation"]["comet_planet_ids"] = obs0["comet_planet_ids"]
+                state[i]["observation"]["rewards_helper"] = obs0["rewards_helper"]
 
         return state
 
@@ -996,12 +998,14 @@ def interpreter(state, env):
                     planet[5] = abs(planet[5])
 
     for i in range(1, num_agents):
+        state[i]["observation"]["step"] = obs0["step"]
         state[i]["observation"]["planets"] = obs0["planets"]
         state[i]["observation"]["initial_planets"] = obs0["initial_planets"]
         state[i]["observation"]["fleets"] = obs0["fleets"]
         state[i]["observation"]["next_fleet_id"] = obs0["next_fleet_id"]
         state[i]["observation"]["comets"] = obs0["comets"]
         state[i]["observation"]["comet_planet_ids"] = obs0["comet_planet_ids"]
+        state[i]["observation"]["rewards_helper"] = obs0["rewards_helper"]
 
     terminated = False
     step = get(obs0, "step", 0)

@@ -2,7 +2,7 @@ from kaggle_environments import make
 from kaggle_environments.envs.orbit_wars.orbit_wars import Planet
 from kaggle_environments.utils import structify
 from typing import Any
-
+import random
 from ..action import ActionBuilder
 from ..config import ActionSpaceConfig, DEFAULT_CONFIG, EnvConfig, RewardConfig
 from ..opponents import NearestPlanetOpponent
@@ -79,6 +79,7 @@ class OrbitWarsSelfPlayEnv:
 
     def reset(self):
         # Advance seed so each episode gets a different planet layout.
+        self.player_index = random.choice([0, 1])
         self._next_seed += 10
         self._env = make(
             "orbit_wars",

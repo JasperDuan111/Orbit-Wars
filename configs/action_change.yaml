@@ -27,10 +27,12 @@ model:
   model_type: "gnn"       # "mlp" (baseline) or "gnn" (GNN+Attention)
   hidden_sizes: [512, 512, 256]  # only used by mlp model
   dropout: 0.1
-  gnn:                          # GNN+Attention model hyperparameters
-    gcn_dims: [256, 128, 128]        # GCN output dims per layer (list length = number of layers)
-    fleet_attn_dims: [512, 256, 128]      # Fleet self-attention projection dims
-    cross_attn_dims: [512, 256, 128]       # Cross-attention projection dims
+  gnn:
+    gcn_dims: [512, 384, 256]
+    fleet_attn_dims: [512, 256, 128]
+    cross_attn_dims: [512, 384, 256]
+
+
 
 reward:
   fleet_advantage_scale: 2.0e-4      # economy: (my_fleets - enemy_fleets) per step
@@ -70,8 +72,8 @@ train:
   gae_lambda: 0.95
 
   # ── PPO clipping ──
-  clip_range: 0.2                # wider clip — allows bigger policy updates (was 0.2)
-
+  clip_range: 0.2
+  
   # ── Optimisation ──
   learning_rate: 2.0e-4
   max_grad_norm: 0.5
@@ -89,4 +91,4 @@ train:
   save_every: 50                 # faster opponent-pool refresh (was 50)
   opponent_refresh: 5            # more frequent opponent rotation (was 5)
   opponent_pool_capacity: 10
-  opponent_rule_prob: 0.3        # 30% chance of rule-based opponent (vs. policy opponent)
+  opponent_rule_prob: 0.8        # 30% chance of rule-based opponent (vs. policy opponent)
