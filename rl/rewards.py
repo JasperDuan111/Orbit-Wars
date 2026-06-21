@@ -269,11 +269,15 @@ class RewardCalculator:
         Fleets smaller than 10 ships earn nothing — this discourages the
         "many tiny launches" degenerate strategy where the model fires
         2–4 ship fleets that arrive but lose every combat.
+
+        After the grace period (step ≤ 50) the penalty is a linear
+        gradient from -5 (1 ship) to -1 (9 ships), so the model can
+        learn to prefer larger fleets without a hard cliff.
         """
         if obs["step"] <= 50 and total_ships < 10:
-            return -0.2
+            return -0.05
         elif total_ships < 10:
-            return -5
+            return -5.0 + 4.0 * total_ships / 9.0    # 0船=-5, 5船≈-2.8, 9船=-1
         return total_ships * self.launch_bonus_scale
 
     # 4 ── Terminal reward ─────────────────────────────────────────
