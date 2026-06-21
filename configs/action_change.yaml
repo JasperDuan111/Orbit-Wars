@@ -17,10 +17,10 @@ obs:
 
 action:
   max_sources: 4
-  max_targets: 8
-  ship_fractions: [0.2, 0.35, 0.5, 0.65, 0.8, 1.0]
+  max_targets: 4
+  ship_fractions: [0.4, 0.8]
   ship_intercepts: [0, 1, 2, 3, 4]
-  max_launches_per_source: 2
+  max_launches_per_source: 1
   epsilon: 0.0                  # ε-greedy exploration (0 = pure argmax, 1 = pure random)
 
 model:
@@ -38,18 +38,18 @@ reward:
   fleet_advantage_scale: 2.0e-4      # economy: (my_fleets - enemy_fleets) per step
   production_advantage_scale: 0.01   # economy: my_prod*log(my_prod) - enemy_prod*log(enemy_prod)
   terminal_economy_scale: 0.1        # economy terminal: my_fleets / total_board_production
-  out_of_boundary_penalty_scale: 0.03
+  out_of_boundary_penalty_scale: 0.02
   suicide_penalty_scale: 0.05
-  planet_count_scale: 0.03          # +0.03 per extra planet owned per step (was 0.02)
-  territory_scale: 0.5              # base reward per capture / loss event
+  planet_count_scale: 0.01          # +0.03 per extra planet owned per step (was 0.02)
+  territory_scale: 1.5              # base reward per capture / loss event
   production_weight: 0.5            # quality multiplier: 1 + prod × weight
   enemy_capture_bonus: 3.0          # enemy→me multiplier (hardest, biggest reward)
   territory_loss_penalty: 2.0        # me→enemy penalty multiplier (worst loss)
   no_action_penalty_scale: 0.03     # penalty per idle step after grace (match economy scale)
-  no_action_grace_steps: 5          # consecutive idle steps before penalty (was 20)
+  no_action_grace_steps: 30          # consecutive idle steps before penalty (was 20)
   launch_bonus_scale: 5.0e-4     # +5e-4 per ship launched — dense signal bridging launch→capture gap
-  terminal_win_scale: 5.0
-  terminal_lose_scale: -5.0
+  terminal_win_scale: 50.0
+  terminal_lose_scale: -50.0
   invalid_action_penalty: 0.1
   only_economy: false
 
@@ -80,7 +80,7 @@ train:
   max_grad_norm: 0.5
 
   # ── Loss weights ──
-  ent_coef: 0.005
+  ent_coef: 0.01
   vf_coef: 1.0
   value_reg: 0.0001                # L2 penalty on value output — prevents collapse to constant
 
@@ -89,7 +89,7 @@ train:
   epochs: 3
 
   # ── Checkpoint & opponent ──
-  save_every: 50                 # faster opponent-pool refresh (was 50)
+  save_every: 20                 # faster opponent-pool refresh (was 50)
   opponent_refresh: 5            # more frequent opponent rotation (was 5)
-  opponent_pool_capacity: 10
+  opponent_pool_capacity: 3
   opponent_rule_prob: 0.8        # 30% chance of rule-based opponent (vs. policy opponent)
