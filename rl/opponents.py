@@ -120,7 +120,6 @@ class PolicyOpponent:
 
         orbit_lookup = build_orbit_lookup(obs)
         angular_velocity = float(obs.get("angular_velocity", 0.0))
-        step = int(obs.get("step", 0))
 
         action_indices, src_indices, _, _ = sample_action_discrete(
             source_logits=sg, ownership_mask=omask,
@@ -131,13 +130,11 @@ class PolicyOpponent:
             planets=planets,
             orbit_lookup=orbit_lookup,
             angular_velocity=angular_velocity,
-            step=step,
         )
         return self._action_builder.decode_all(
             planets, action_indices, src_indices, planet_ships_dict, non_my_idx,
             orbit_lookup=orbit_lookup,
-            angular_velocity=angular_velocity,
-            step=step)
+            angular_velocity=angular_velocity)
 
     @staticmethod
     def batch_act(opponents_with_obs, device, action_config=None, obs_config=None,
@@ -182,7 +179,6 @@ class PolicyOpponent:
 
                 ol = build_orbit_lookup(obs)
                 av = float(obs.get("angular_velocity", 0.0))
-                st = int(obs.get("step", 0))
 
                 acts, src_i, _, _ = sample_action_discrete(
                     source_logits=sg_b[i], ownership_mask=omask_b[i],
@@ -192,11 +188,11 @@ class PolicyOpponent:
                     max_launches=max_launches,
                     deterministic=True, ship_fractions=action_config.ship_fractions,
                     planets=pbi,
-                    orbit_lookup=ol, angular_velocity=av, step=st,
+                    orbit_lookup=ol, angular_velocity=av,
                 )
                 results[idx] = first._action_builder.decode_all(
                     pbi, acts, src_i, planet_ships_dict, non_i,
-                    orbit_lookup=ol, angular_velocity=av, step=st)
+                    orbit_lookup=ol, angular_velocity=av)
 
         return results
 
@@ -289,8 +285,8 @@ class OpponentPool:
 
         rule_pool = [
             NearestPlanetOpponent(),
-            DoNothingOpponent(),
-            RandomOpponent(),
+            # DoNothingOpponent(),
+            # RandomOpponent(),
             RuleBasedStarter(),
         ] + self._static_opponents
 

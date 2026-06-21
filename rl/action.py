@@ -183,14 +183,20 @@ def compute_intercept_angle(
     fleet_speed: float,
     orbit_lookup: dict,
     angular_velocity: float,
-    step: int,
     return_pos: bool = False,
 ):
     """Compute firing angle to intercept a (possibly orbiting) target.
 
     For static planets the angle is simply the bearing to the current
-    position.  For rotating planets an iterative predictor–corrector
-    loop (max 10 iterations) converges on the intercept angle.
+    position.  For rotating planets the **secant method** solves for the
+    flight time ``t`` that satisfies::
+
+        distance(source, target_pos(θ₀ + ω·t)) - fleet_speed · t = 0
+
+    The secant method converges superlinearly and is robust across all
+    parameter ranges, unlike the previous fixed-point iteration which
+    diverged when ``ω·r / fleet_speed > 1`` (slow fleets vs. fast, far
+    orbiting planets).
 
     When ``return_pos`` is True, also returns ``(future_tx, future_ty)``
     — the cartesian coordinates of the predicted intercept point.  This
@@ -205,30 +211,65 @@ def compute_intercept_angle(
     r = info['orbital_r']
     cx, cy = _SUN_CENTER
 
-    # Current angular position of the target
-    theta = info['initial_angle'] + angular_velocity * step
+    # Current angular position of the target, derived from the planet's
+    # actual coordinates in the observation (not from ``step``, which is
+    # managed by the framework and can be offset from the true position).
+    theta_0 = math.atan2(tgt_y - cy, tgt_x - cx)
 
-    # Current cartesian position (should match tgt_x, tgt_y)
-    cur_tx = cx + r * math.cos(theta)
-    cur_ty = cy + r * math.sin(theta)
+    # ── Helper: target cartesian position after *t* ticks ──────────
+    def _target_pos(t: float):
+        th = theta_0 + angular_velocity * t
+        return (cx + r * math.cos(th), cy + r * math.sin(th))
 
-    # Iterative refinement — usually converges in 2–3 steps
-    angle = math.atan2(cur_ty - src_y, cur_tx - src_x)
-    for _ in range(10):
-        dist = math.hypot(cur_tx - src_x, cur_ty - src_y)
-        flight_time = dist / max(fleet_speed, 0.01)
+    # ── f(t) = distance(source, target(t)) - fleet_speed * t ──────
+    def _f(t: float):
+        tx, ty = _target_pos(t)
+        d = math.hypot(ty - src_y, tx - src_x)
+        return d - fleet_speed * t
 
-        future_theta = theta + angular_velocity * flight_time
-        future_tx = cx + r * math.cos(future_theta)
-        future_ty = cy + r * math.sin(future_theta)
+    # Initial guesses for the secant method
+    t0 = 0.0
+    f0 = _f(t0)  # > 0 unless source already at target
 
-        new_angle = math.atan2(future_ty - src_y, future_tx - src_x)
-        if abs(new_angle - angle) < 1e-6:
+    # If the fleet can't even reach the target in a reasonable time,
+    # fall back to aiming at the current position.
+    if f0 <= 0:
+        angle = math.atan2(tgt_y - src_y, tgt_x - src_x)
+        return (angle, tgt_x, tgt_y) if return_pos else angle
+
+    t1 = math.hypot(tgt_y - src_y, tgt_x - src_x) / max(fleet_speed, 0.01)
+    f1 = _f(t1)
+
+    # Already good enough — return immediately
+    if abs(f1) < 1e-3:
+        tx, ty = _target_pos(t1)
+        angle = math.atan2(ty - src_y, tx - src_x)
+        return (angle, tx, ty) if return_pos else angle
+
+    # Secant method:  t_{n+1} = t_n - f(t_n) · (t_n - t_{n-1}) / (f(t_n) - f(t_{n-1}))
+    for _ in range(15):
+        denom = f1 - f0
+        if abs(denom) < 1e-12:
+            break          # near-flat — accept current estimate
+
+        t2 = t1 - f1 * (t1 - t0) / denom
+        # Guard against negative or unreasonably large steps
+        if t2 < 0:
+            t2 = t1 * 0.5
+        elif t2 > t1 * 10:
+            t2 = t1 * 2.0
+
+        t0, t1 = t1, t2
+        f0, f1 = f1, _f(t1)
+
+        if abs(f1) < 1e-3:
             break
-        angle = new_angle
-        cur_tx, cur_ty = future_tx, future_ty
+        if abs(t1 - t0) < 1e-4:
+            break
 
-    return (angle, future_tx, future_ty) if return_pos else angle
+    tx, ty = _target_pos(t1)
+    angle = math.atan2(ty - src_y, tx - src_x)
+    return (angle, tx, ty) if return_pos else angle
 
 
 class ActionBuilder:
@@ -263,7 +304,7 @@ class ActionBuilder:
         return planets, [i for i, _ in my], non_my, player_id
 
     def decode(self, planet_by_idx, src_obs_idx, tgt_obs_idx, frac_idx, remaining,
-               orbit_lookup=None, angular_velocity=0.0, step=0):
+               orbit_lookup=None, angular_velocity=0.0):
         src = planet_by_idx[src_obs_idx]
         tgt = planet_by_idx[tgt_obs_idx]
         frac = self.ship_fractions[frac_idx]
@@ -280,7 +321,6 @@ class ActionBuilder:
             fleet_speed=speed,
             orbit_lookup=orbit_lookup or {},
             angular_velocity=angular_velocity,
-            step=step,
             return_pos=True,
         )
 
@@ -292,7 +332,7 @@ class ActionBuilder:
 
     def decode_all(self, planets, action_indices, source_indices,
                    planet_ships, valid_targets,
-                   orbit_lookup=None, angular_velocity=0.0, step=0):
+                   orbit_lookup=None, angular_velocity=0.0):
         """Convert per-slot action indices into game moves."""
         moves = []
         remaining = dict(planet_ships)
@@ -314,7 +354,7 @@ class ActionBuilder:
                 real_tgt = valid_targets[tgt_cat - 1]
                 frac_idx = int(action_indices[s, ll, 1].item())
                 move = self.decode(planets, src_idx, real_tgt, frac_idx, rem,
-                                   _ol, angular_velocity, step)
+                                   _ol, angular_velocity)
                 if move is None:
                     continue
                 moves.append(move)
@@ -397,7 +437,6 @@ def sample_action_discrete(
     planets=None,          # list of Planet objects (for sun collision)
     orbit_lookup=None,     # {planet_id: {orbital_r, initial_angle, rotates}} — for intercept
     angular_velocity=0.0,  # radians per step
-    step=0,                # current game step
 ):
     """Per-slot action sampling: source → target → fraction.
 
@@ -538,7 +577,6 @@ def sample_action_discrete(
                     fleet_speed=speed,
                     orbit_lookup=orbit_lookup or {},
                     angular_velocity=angular_velocity,
-                    step=step,
                     return_pos=True,
                 )
                 if trajectory_blocked(src_p.x, src_p.y, angle=int_angle,
@@ -580,7 +618,6 @@ def logprob_batched_combined(
     ship_fractions,
     all_planets=None,          # list of Planet lists (for sun collision; optional)
     all_orbit_lookups=None,    # list of orbit lookup dicts
-    all_steps=None,            # list of int steps
     all_ang_vels=None,         # list of float angular_velocities
 ):
     """Batched log-probability + entropy for PPO update.
@@ -695,14 +732,12 @@ def logprob_batched_combined(
                     speed = _fleet_speed(ships)
                     ol = all_orbit_lookups[b] if all_orbit_lookups else {}
                     _av = all_ang_vels[b] if all_ang_vels else 0.0
-                    _st = all_steps[b] if all_steps else 0
                     int_angle, fut_x, fut_y = compute_intercept_angle(
                         src_x=src_p.x, src_y=src_p.y,
                         tgt_id=tgt_p.id, tgt_x=tgt_p.x, tgt_y=tgt_p.y,
                         fleet_speed=speed,
                         orbit_lookup=ol,
                         angular_velocity=_av,
-                        step=_st,
                         return_pos=True,
                     )
                     if trajectory_blocked(src_p.x, src_p.y, angle=int_angle,

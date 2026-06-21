@@ -36,7 +36,7 @@ from rl.models import ActorCritic, ActorCriticGNN
 from rl.obs import encode_observation
 
 # ── Shared config & device ───────────────────────────────────────────
-CONFIG_PATH = os.path.join(_project_root, "configs", "larger_model.yaml")
+CONFIG_PATH = os.path.join(_project_root, "configs", "action_change.yaml")
 CONFIG = OrbitWarsConfig.from_yaml(CONFIG_PATH) if os.path.exists(CONFIG_PATH) else OrbitWarsConfig()
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 ACTION_BUILDER = ActionBuilder(CONFIG.action)
@@ -103,7 +103,6 @@ def _policy_forward(obs, model):
 
     orbit_lookup = build_orbit_lookup(obs)
     angular_velocity = float(obs.get("angular_velocity", 0.0))
-    step = int(obs.get("step", 0))
 
     action_indices, src_indices, _, _ = sample_action_discrete(
         source_logits=sg, ownership_mask=omask,
@@ -112,12 +111,12 @@ def _policy_forward(obs, model):
         max_launches=MAX_LAUNCHES, deterministic=True,
         ship_fractions=CONFIG.action.ship_fractions,
         planets=planets, orbit_lookup=orbit_lookup,
-        angular_velocity=angular_velocity, step=step,
+        angular_velocity=angular_velocity,
     )
 
     return ACTION_BUILDER.decode_all(
         planets, action_indices, src_indices, planet_ships_dict, non_my_idx,
-        orbit_lookup=orbit_lookup, angular_velocity=angular_velocity, step=step)
+        orbit_lookup=orbit_lookup, angular_velocity=angular_velocity)
 
 
 def _make_policy_agent(checkpoint_path: str):
