@@ -156,7 +156,7 @@ class RewardCalculator:
             reward += self._no_action_penalty(total_ships)
         else:
             # ── Combat: map control + territory events + terminal ──
-            reward += self._launch_bonus(total_ships)
+            reward += self._launch_bonus(obs, total_ships)
             reward += self._economy_fleet_advantage(my_total, enemy_total)
             reward += self._planet_count_advantage(obs, player_id)
             reward += self._economy_production_advantage(obs, player_id)
@@ -263,20 +263,18 @@ class RewardCalculator:
         excess = self._idle_steps - self.no_action_grace_steps
         return -self.no_action_penalty_scale * (1.0 + 0.1 * excess)
 
-    def _launch_bonus(self, total_ships: int) -> float:
-        """Non-linear launch bonus that strongly penalises tiny fleets.
+    def _launch_bonus(self, obs, total_ships: int) -> float:
+        """Per-ship launch bonus with a minimum-ships gate.
 
-        Below 20 ships the bonus drops quadratically — a 4-ship launch
-        earns almost nothing, a 10-ship launch earns 1/4 of normal.
-        Above 20 ships the bonus scales linearly to reward mass.
+        Fleets smaller than 10 ships earn nothing — this discourages the
+        "many tiny launches" degenerate strategy where the model fires
+        2–4 ship fleets that arrive but lose every combat.
         """
-        if total_ships <= 0:
-            return 0.0
-        if total_ships < 20:
-            factor = (total_ships / 20.0) ** 2
-        else:
-            factor = 1.0
-        return total_ships * self.launch_bonus_scale * factor
+        if obs["step"] <= 50:
+            return -0.2
+        elif total_ships < 10:
+            return -5
+        return total_ships * self.launch_bonus_scale
 
     # 4 ── Terminal reward ─────────────────────────────────────────
     def _terminal_reward(self, diff: float, is_done: bool) -> float:
