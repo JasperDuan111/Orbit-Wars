@@ -93,5 +93,5 @@ train:
   # ── Checkpoint & opponent ──
   save_every: 20                 # faster opponent-pool refresh (was 50)
   opponent_refresh: 5            # more frequent opponent rotation (was 5)
-  opponent_pool_capacity: 3
-  opponent_rule_prob: 0.8        # 30% chance of rule-based opponent (vs. policy opponent)
+  opponent_pool_capacity: 10
+  opponent_rule_prob: 0.5        # 30% chance of rule-based opponent (vs. policy opponent)

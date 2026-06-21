@@ -276,14 +276,17 @@ class RewardCalculator:
         "many tiny launches" degenerate strategy where the model fires
         2–4 ship fleets that arrive but lose every combat.
 
-        After the grace period (step ≤ 50) the penalty is a linear
-        gradient from -5 (1 ship) to -1 (9 ships), so the model can
-        learn to prefer larger fleets without a hard cliff.
+        Not-launching (0 ships) is NOT penalised here — ``_no_action_penalty``
+        handles prolonged inaction with its own grace + escalating mechanism.
+        The penalty gradient for 1–9 ships is deliberately mild so the model
+        can occasionally risk a small fleet without catastrophic punishment.
         """
+        if total_ships == 0:
+            return 0.0                      # idle penalty handles this
         if obs["step"] <= 50 and total_ships < 10:
-            return -0.05
-        elif total_ships < 10:
-            return -5.0 + 4.0 * total_ships / 9.0    # 0船=-5, 5船≈-2.8, 9船=-1
+            return -0.05                    # early game: gentle nudge
+        if total_ships < 10:
+            return -0.5 + 0.45 * (total_ships - 1) / 8.0   # 1船=-0.50, 5船=-0.28, 9船=-0.05
         return total_ships * self.launch_bonus_scale
 
     def _defense_success(self, defense_ships: int) -> float:
