@@ -227,35 +227,49 @@ def compute_intercept_angle(
         d = math.hypot(ty - src_y, tx - src_x)
         return d - fleet_speed * t
 
-    # Initial guesses for the secant method
-    t0 = 0.0
-    f0 = _f(t0)  # > 0 unless source already at target
+    # Initial guess: straight-line flight time to the current position
+    t_cur = math.hypot(tgt_y - src_y, tgt_x - src_x) / max(fleet_speed, 0.01)
+    f_cur = _f(t_cur)
 
-    # If the fleet can't even reach the target in a reasonable time,
-    # fall back to aiming at the current position.
-    if f0 <= 0:
-        angle = math.atan2(tgt_y - src_y, tgt_x - src_x)
-        return (angle, tgt_x, tgt_y) if return_pos else angle
+    if f_cur <= 0:
+        # Straight-line aim already reaches or overshoots — the minimal
+        # positive root is between 0 and t_cur.  Bisect to find it.
+        t_lo, f_lo = 0.0, math.hypot(tgt_y - src_y, tgt_x - src_x)  # f(0) = distance
+        t_hi, f_hi = t_cur, f_cur
+    else:
+        # f(t_cur) > 0 — the planet "runs away".  Walk forward in steps
+        # ≤ 1/8 of the orbit period (so we cannot miss an f < 0 window)
+        # until we reach an f ≤ 0 point or the guaranteed upper bound
+        # t_ub = (D + r) / v  where f(t_ub) ≤ 0 by triangle inequality.
+        t_lo, f_lo = t_cur, f_cur
 
-    t1 = math.hypot(tgt_y - src_y, tgt_x - src_x) / max(fleet_speed, 0.01)
-    f1 = _f(t1)
+        src_dist_to_center = math.hypot(src_x - cx, src_y - cy)
+        t_ub = (src_dist_to_center + r) / max(fleet_speed, 0.01) + 0.1
+        orbit_period = 2.0 * math.pi / max(angular_velocity, 0.001)
+        t_step = max(1.0, orbit_period / 10.0)
 
-    # ── Bracket the root: if f0 and f1 have the same sign, expand ──
-    #     t1 until we find a negative f(t).  This handles the case
-    #     where the planet rotates away faster than the fleet moves:
-    #     the fleet must aim at a point the planet will reach after
-    #     travelling most of its orbit (large t).
-    _expand = 0
-    while f0 * f1 > 0 and _expand < 12:
-        t0, t1 = t1, t1 * 1.6
-        f0, f1 = f1, _f(t1)
-        _expand += 1
+        t_hi = t_cur + t_step
+        f_hi = _f(t_hi)
+        while f_hi > 0 and t_hi < t_ub:
+            t_lo, t_hi = t_hi, t_hi + t_step
+            f_lo, f_hi = f_hi, _f(t_hi)
+
+    # If the bracket endpoints are still same-sign, fall back to
+    # the guaranteed upper bound (should never happen, but guard).
+    if f_lo * f_hi > 0:
+        t_hi = t_ub
+        f_hi = _f(t_hi)
 
     # Already good enough — return immediately
-    if abs(f1) < 1e-3:
-        tx, ty = _target_pos(t1)
+    if abs(f_hi) < 1e-3:
+        tx, ty = _target_pos(t_hi)
         angle = math.atan2(ty - src_y, tx - src_x)
         return (angle, tx, ty) if return_pos else angle
+
+    # ── Secant method on guaranteed bracket [t_lo, t_hi] where ────
+    #     f(t_lo) > 0 and f(t_hi) ≤ 0.
+    t0, f0 = t_lo, f_lo
+    t1, f1 = t_hi, f_hi
 
     # Secant method:  t_{n+1} = t_n - f(t_n) · (t_n - t_{n-1}) / (f(t_n) - f(t_{n-1}))
     for _ in range(15):

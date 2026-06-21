@@ -286,7 +286,7 @@ class RewardCalculator:
         if obs["step"] <= 50 and total_ships < 10:
             return -0.05                    # early game: gentle nudge
         if total_ships < 10:
-            return -0.5 + 0.45 * (total_ships - 1) / 8.0   # 1船=-0.50, 5船=-0.28, 9船=-0.05
+            return -5.0 + 4.5 * (total_ships - 1) / 8.0
         return total_ships * self.launch_bonus_scale
 
     def _defense_success(self, defense_ships: int) -> float:
