@@ -106,6 +106,10 @@ class RewardConfig:
     # ── Launch bonus: immediate positive signal per launch ──
     launch_bonus_scale: float = 5.0e-4      # +5e-4 per ship launched (not per-launch)
 
+    # ── Fleet combat events: bridge launch → capture gap ──
+    defense_success_scale: float = 0.005    # +0.005 per enemy ship destroyed while defending own planet
+    fleet_arrival_scale: float = 0.005      # +0.005 per ship that reached enemy/neutral planet
+
     # ── Terminal  (asymmetric) ──
     terminal_win_scale: float = 15.0
     terminal_lose_scale: float = -15.0

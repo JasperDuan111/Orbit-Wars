@@ -104,6 +104,8 @@ class RewardCalculator:
         self.territory_loss_penalty: float = reward_config.territory_loss_penalty
         self.no_action_penalty_scale: float = reward_config.no_action_penalty_scale
         self.launch_bonus_scale: float = reward_config.launch_bonus_scale
+        self.defense_success_scale: float = getattr(reward_config, 'defense_success_scale', 0.01)
+        self.fleet_arrival_scale: float = getattr(reward_config, 'fleet_arrival_scale', 0.005)
         self.terminal_win_scale: float = reward_config.terminal_win_scale
         self.terminal_lose_scale: float = reward_config.terminal_lose_scale
         self.invalid_action_penalty: float = reward_config.invalid_action_penalty
@@ -145,6 +147,8 @@ class RewardCalculator:
         rewards_helper = obs["rewards_helper"]
         out_of_boundary = rewards_helper["out_of_boundary"]
         suicide = rewards_helper["suicide"]
+        defense_ships = rewards_helper.get("defense_ships", {}).get(player_id, 0)
+        arrival_ships = rewards_helper.get("arrival_ships", {}).get(player_id, 0)
 
         reward = 0.0
         if self.only_economy:
@@ -161,6 +165,8 @@ class RewardCalculator:
             reward += self._planet_count_advantage(obs, player_id)
             reward += self._economy_production_advantage(obs, player_id)
             reward += self._territory_change(obs, player_id)
+            reward += self._defense_success(defense_ships)
+            reward += self._fleet_arrival(arrival_ships)
             reward += self._terminal_reward(diff, is_done)
             reward += self._wrong_action_penalty(out_of_boundary, suicide)
             reward += self._no_action_penalty(total_ships)
@@ -279,6 +285,24 @@ class RewardCalculator:
         elif total_ships < 10:
             return -5.0 + 4.0 * total_ships / 9.0    # 0船=-5, 5船≈-2.8, 9船=-1
         return total_ships * self.launch_bonus_scale
+
+    def _defense_success(self, defense_ships: int) -> float:
+        """Reward for destroying enemy ships while defending own planets.
+
+        Bridges the launch→capture credit-assignment gap: the model
+        learns that fleets en route to enemy planets are valuable even
+        before they arrive, and that intercepting enemy attacks pays off.
+        """
+        return defense_ships * self.defense_success_scale
+
+    def _fleet_arrival(self, arrival_ships: int) -> float:
+        """Reward for ships that successfully reached an enemy or neutral planet.
+
+        This is the "your fleet navigated correctly" signal — it tells
+        the model that the launch angle and target choice were good,
+        closing the 4–8 step credit gap between launch and capture.
+        """
+        return arrival_ships * self.fleet_arrival_scale
 
     # 4 ── Terminal reward ─────────────────────────────────────────
     def _terminal_reward(self, diff: float, is_done: bool) -> float:

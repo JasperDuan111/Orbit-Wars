@@ -18,9 +18,9 @@ obs:
 action:
   max_sources: 4
   max_targets: 4
-  ship_fractions: [0.4, 0.8]
+  ship_fractions: [0.25, 0.5, 0.75, 1.0]
   ship_intercepts: [0, 1, 2, 3, 4]
-  max_launches_per_source: 1
+  max_launches_per_source: 2
   epsilon: 0.0                  # ε-greedy exploration (0 = pure argmax, 1 = pure random)
 
 model:
@@ -48,6 +48,8 @@ reward:
   no_action_penalty_scale: 0.03     # penalty per idle step after grace (match economy scale)
   no_action_grace_steps: 30          # consecutive idle steps before penalty (was 20)
   launch_bonus_scale: 5.0e-4     # +5e-4 per ship launched — dense signal bridging launch→capture gap
+  defense_success_scale: 0.005   # +0.005 per enemy ship destroyed while defending
+  fleet_arrival_scale: 0.005     # +0.005 per ship that reached enemy/neutral planet
   terminal_win_scale: 50.0
   terminal_lose_scale: -50.0
   invalid_action_penalty: 0.1

@@ -877,6 +877,8 @@ def interpreter(state, env):
 
     out_of_boundary = 0
     suicide = 0
+    defense_ships = {p: 0 for p in range(num_agents)}
+    arrival_ships = {p: 0 for p in range(num_agents)}
     for i, fleet in enumerate(obs0["fleets"]):
         if (remove_flag := remove_flags[i]) != 0:
             if remove_flag == 2:
@@ -890,6 +892,8 @@ def interpreter(state, env):
     
     obs0["rewards_helper"]["out_of_boundary"] = out_of_boundary
     obs0["rewards_helper"]["suicide"] = suicide
+    obs0["rewards_helper"]["defense_ships"] = defense_ships
+    obs0["rewards_helper"]["arrival_ships"] = arrival_ships
 
     for fleet_idx, _pid in zip(hit_f_idx, hit_p_id):
         combat_lists[_pid].append(obs0["fleets"][fleet_idx])
@@ -962,6 +966,8 @@ def interpreter(state, env):
         if not planet or not planet_fleets:
             continue
 
+        original_owner = planet[1]  # save before combat may change it
+
         # Sum ships per player
         player_ships = {}
         for fleet in planet_fleets:
@@ -996,6 +1002,18 @@ def interpreter(state, env):
                 if planet[5] < 0:
                     planet[1] = survivor_owner
                     planet[5] = abs(planet[5])
+
+        # ── Per-player combat stats for reward signals ──────────────
+        # Fleet arrival: ships that reached an enemy / neutral planet
+        for player_id, ships in player_ships.items():
+            if player_id != original_owner:
+                arrival_ships[player_id] += ships
+
+        # Defense success: original owner kept the planet despite attack
+        if original_owner != -1 and planet[1] == original_owner:
+            for player_id, ships in player_ships.items():
+                if player_id != original_owner:
+                    defense_ships[original_owner] += ships
 
     for i in range(1, num_agents):
         state[i]["observation"]["step"] = obs0["step"]
