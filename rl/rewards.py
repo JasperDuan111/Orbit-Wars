@@ -270,7 +270,7 @@ class RewardCalculator:
         "many tiny launches" degenerate strategy where the model fires
         2–4 ship fleets that arrive but lose every combat.
         """
-        if obs["step"] <= 50:
+        if obs["step"] <= 50 and total_ships < 10:
             return -0.2
         elif total_ships < 10:
             return -5
