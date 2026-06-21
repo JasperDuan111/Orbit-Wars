@@ -240,6 +240,17 @@ def compute_intercept_angle(
     t1 = math.hypot(tgt_y - src_y, tgt_x - src_x) / max(fleet_speed, 0.01)
     f1 = _f(t1)
 
+    # ── Bracket the root: if f0 and f1 have the same sign, expand ──
+    #     t1 until we find a negative f(t).  This handles the case
+    #     where the planet rotates away faster than the fleet moves:
+    #     the fleet must aim at a point the planet will reach after
+    #     travelling most of its orbit (large t).
+    _expand = 0
+    while f0 * f1 > 0 and _expand < 12:
+        t0, t1 = t1, t1 * 1.6
+        f0, f1 = f1, _f(t1)
+        _expand += 1
+
     # Already good enough — return immediately
     if abs(f1) < 1e-3:
         tx, ty = _target_pos(t1)
