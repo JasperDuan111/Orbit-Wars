@@ -48,6 +48,66 @@ def _point_to_segment_dist_sq(px: float, py: float,
     return (px - proj_x) ** 2 + (py - proj_y) ** 2
 
 
+def trajectory_blocked(
+    src_x: float, src_y: float,
+    angle: float,
+    tgt_x: float, tgt_y: float,
+    center: Tuple[float, float] = _SUN_CENTER,
+    sun_radius: float = _SUN_RADIUS,
+    board_size: float = _BOARD_SIZE,
+    src_radius: float = 0.0,
+) -> bool:
+    """Return True if the straight-line ray from src at *angle* hits the sun
+    OR the board edge **before** reaching (tgt_x, tgt_y).
+
+    ``src_radius`` shifts the ray start outward to match the engine's
+    actual fleet spawn point (planet surface + 0.1).  Without this, edge
+    distances are underestimated, letting fleets that would overshoot the
+    board through the check.
+    """
+    # Engine spawn: planet_center + (radius + 0.1) * direction
+    offset = src_radius + 0.1
+    src_x = src_x + math.cos(angle) * offset
+    src_y = src_y + math.sin(angle) * offset
+
+    # If the spawn point is already outside the board, the fleet is
+    # immediately destroyed by the engine — block it before launch.
+    if not (0 <= src_x <= board_size and 0 <= src_y <= board_size):
+        return True
+
+    dx, dy = math.cos(angle), math.sin(angle)
+
+    # Distance from source to target projected along the ray
+    proj_tgt = (tgt_x - src_x) * dx + (tgt_y - src_y) * dy
+    if proj_tgt <= 0:
+        return True
+
+    # ── Sun check ──
+    to_cx, to_cy = center[0] - src_x, center[1] - src_y
+    proj_sun = to_cx * dx + to_cy * dy
+    if proj_sun > 0 and proj_sun < proj_tgt:
+        closest_x = src_x + proj_sun * dx
+        closest_y = src_y + proj_sun * dy
+        d2 = (center[0] - closest_x) ** 2 + (center[1] - closest_y) ** 2
+        if d2 < sun_radius * sun_radius + 1e-6:
+            return True
+
+    # ── Board edge check ──
+    for coord, axis in ((board_size, 'x'), (0.0, 'x'), (board_size, 'y'), (0.0, 'y')):
+        if axis == 'x':
+            if abs(dx) < 1e-10:
+                continue
+            t = (coord - src_x) / dx
+        else:
+            if abs(dy) < 1e-10:
+                continue
+            t = (coord - src_y) / dy
+        if 0 < t < proj_tgt:
+            return True
+
+    return False
+
+
 def trajectory_hits_sun(
     src_x: float, src_y: float,
     angle: float = None,
@@ -194,7 +254,12 @@ class ActionBuilder:
         ))
         my = [(i, p) for i, p in enumerate(planets) if p.owner == player_id]
         my.sort(key=lambda x: x[1].ships, reverse=True)
-        non_my = [i for i, p in enumerate(planets) if p.owner != player_id]
+        # Exclude comets from valid targets — they move along fixed paths,
+        # not circular orbits, so our intercept-angle prediction is wrong
+        # for them.  Targeting a comet almost guarantees a miss.
+        comet_ids = set(_get_field(obs, "comet_planet_ids", []))
+        non_my = [i for i, p in enumerate(planets)
+                  if p.owner != player_id and p.id not in comet_ids]
         return planets, [i for i, _ in my], non_my, player_id
 
     def decode(self, planet_by_idx, src_obs_idx, tgt_obs_idx, frac_idx, remaining,
@@ -219,8 +284,9 @@ class ActionBuilder:
             return_pos=True,
         )
 
-        if trajectory_hits_sun(src.x, src.y, angle=angle,
-                                tgt_x=fut_x, tgt_y=fut_y):
+        if trajectory_blocked(src.x, src.y, angle=angle,
+                                tgt_x=fut_x, tgt_y=fut_y,
+                                src_radius=src.radius):
             return None
         return [src.id, angle, ships]
 
@@ -241,8 +307,10 @@ class ActionBuilder:
                 continue
             for ll in range(self.max_launches):
                 tgt_cat = int(action_indices[s, ll, 0].item())
-                if tgt_cat <= 0:
-                    break
+                if tgt_cat < 0:
+                    continue      # sun-blocked → skip to next launch
+                if tgt_cat == 0:
+                    break         # STOP → end this source's launches
                 real_tgt = valid_targets[tgt_cat - 1]
                 frac_idx = int(action_indices[s, ll, 1].item())
                 move = self.decode(planets, src_idx, real_tgt, frac_idx, rem,
@@ -334,10 +402,15 @@ def sample_action_discrete(
     """Per-slot action sampling: source → target → fraction.
 
     ε-greedy exploration: random uniform with prob ε, argmax with prob 1-ε.
-    Logprobs always use the model's softmax distribution.
-    Ships are only consumed when the trajectory does NOT hit the sun,
-    matching the actual execution in ``decode_all`` (intercept angle
-    + future target position for correct rotating-target sun check).
+    Logprobs use the model's softmax distribution.  Ships are consumed and
+    logprobs recorded **only after** a sun-collision check with the actual
+    fleet speed (computed from the chosen fraction), so blocked launches
+    cost no probability and waste no ships — no pre-computed visibility
+    needed.
+
+    ``action_indices`` are initialised to -1 (invalid).  ``decode_all``
+    treats negative ``tgt_cat`` as a no-op (sun-blocked launch) and
+    ``tgt_cat == 0`` as STOP.
 
     **Sequential source masking**: once a planet is selected by a previous
     slot it is masked from all subsequent slots, forcing slot diversity.
@@ -356,7 +429,7 @@ def sample_action_discrete(
     eps = 0.0 if deterministic else epsilon
     fill_val = float('-inf')
 
-    action_indices = torch.zeros((S, L, 2), dtype=torch.long, device=device)
+    action_indices = torch.full((S, L, 2), -1, dtype=torch.long, device=device)
     source_indices = torch.zeros(S, dtype=torch.long, device=device)
     lp = torch.zeros((), device=device)
     ent = torch.zeros((), device=device)
@@ -379,8 +452,13 @@ def sample_action_discrete(
     rand_tgt_int    = torch.randint(0, max(len(valid_targets), 0) + 1, (S, L), device=device)
     rand_frac_int   = torch.randint(0, n_fracs, (S, L), device=device)
 
-    # Base source logits — ownership mask only (drain mask added per slot)
-    src_base = source_logits.masked_fill(~ownership_mask.unsqueeze(0), fill_val)
+    # Base source logits — ownership + has_ships (drain mask added per slot)
+    has_ships = torch.zeros(N, dtype=torch.bool, device=device)
+    for pi, cnt in planet_ships.items():
+        if cnt > 0:
+            has_ships[pi] = True
+    src_base = source_logits.masked_fill(
+        ~ownership_mask.unsqueeze(0) | ~has_ships.unsqueeze(0), fill_val)
 
     # ── Ship state (Python) for sequential consumption ─────────────
     remaining_ships = dict(planet_ships)
@@ -401,14 +479,13 @@ def sample_action_discrete(
         src_ent_s = -(safe_src_s.exp() * safe_src_s).sum(dim=-1)
 
         # ── 2. Source selection ──
-        #     If all owned planets are drained, stop assigning slots.
-        n_avail_source = (~used_mask[owned_idx]).sum().item() if n_owned > 0 else 0
-        if n_avail_source == 0:
+        #     Filter to planets with ships AND not already used.
+        avail_source = owned_idx[has_ships[owned_idx] & ~used_mask[owned_idx]] if n_owned > 0 else owned_idx
+        if len(avail_source) == 0:
             break
 
         if eps > 0 and rand_source[s].item() < eps:
-            avail = owned_idx[~used_mask[owned_idx]]
-            src_idx = int(avail[rand_source_int[s].item() % len(avail)].item())
+            src_idx = int(avail_source[rand_source_int[s].item() % len(avail_source)].item())
         else:
             src_idx = int(torch.argmax(src_s).item())
 
@@ -418,10 +495,9 @@ def sample_action_discrete(
 
         rem = remaining_ships.get(src_idx, 0)
         if rem <= 0:
-            remaining_ships[src_idx] = 0  # mark depleted for later slots
+            remaining_ships[src_idx] = 0
             continue
 
-        # Resolve source planet coordinates once
         src_p = planets[src_idx] if planets is not None else None
 
         for ll in range(L):
@@ -431,11 +507,10 @@ def sample_action_discrete(
             else:
                 tgt_cat = int(torch.argmax(combined[s]).item())
 
-            lp += tgt_logp[s, tgt_cat]
-            ent += tgt_ent[s]
-
-            action_indices[s, ll, 0] = tgt_cat
             if tgt_cat == 0:
+                lp += tgt_logp[s, tgt_cat]
+                ent += tgt_ent[s]
+                action_indices[s, ll, 0] = tgt_cat
                 break
 
             real_tgt_idx = valid_targets[tgt_cat - 1]
@@ -449,18 +524,11 @@ def sample_action_discrete(
             else:
                 fa = int(torch.argmax(f_logits).item())
 
-            lp += f_logp[fa]
-            safe_flp = f_logp.masked_fill(f_logp == fill_val, 0.0)
-            ent -= (safe_flp.exp() * safe_flp).sum()
-
-            action_indices[s, ll, 1] = fa
-
             _f = ship_fractions[fa]
             ships = max(1, min(int(rem * _f), rem))
 
-            # Sun collision guard — use intercept angle + future target
-            # position, matching ``decode()`` exactly so that ship
-            # consumption in sampling and replay stays consistent.
+            # 5. Sun check with REAL fleet speed from chosen fraction.
+            #    Blocked → skip silently: no lp, no ship, no action record.
             if planets is not None and src_p is not None:
                 tgt_p = planets[real_tgt_idx]
                 speed = _fleet_speed(ships)
@@ -473,9 +541,19 @@ def sample_action_discrete(
                     step=step,
                     return_pos=True,
                 )
-                if trajectory_hits_sun(src_p.x, src_p.y, angle=int_angle,
-                                        tgt_x=fut_x, tgt_y=fut_y):
-                    continue  # ← keeps `rem` unchanged, ll still advances
+                if trajectory_blocked(src_p.x, src_p.y, angle=int_angle,
+                                        tgt_x=fut_x, tgt_y=fut_y,
+                                        src_radius=src_p.radius):
+                    continue  # no lp, no consumption — ll advances
+
+            # ── Commit: only after sun check passes ──
+            lp += tgt_logp[s, tgt_cat]
+            ent += tgt_ent[s]
+            lp += f_logp[fa]
+            safe_flp = f_logp.masked_fill(f_logp == fill_val, 0.0)
+            ent -= (safe_flp.exp() * safe_flp).sum()
+            action_indices[s, ll, 0] = tgt_cat
+            action_indices[s, ll, 1] = fa
 
             rem -= ships
             if rem <= 0:
@@ -511,8 +589,9 @@ def logprob_batched_combined(
     sun-colliding launches do NOT consume ships, using the same
     intercept-angle + future-position sun check as ``decode()``.
 
-    Source logprobs are recomputed per-slot with sequential used
-    masking, matching the behaviour of ``sample_action_discrete``.
+    Logprobs are only accumulated after the sun check passes, matching
+    ``sample_action_discrete`` exactly.  Slots with ``tgt_cat < 0``
+    are sun-blocked and skipped without contribution.
     """
     B, S, N = tgt_scores.shape
     L = max_launches
@@ -521,6 +600,13 @@ def logprob_batched_combined(
 
     src_idx_batch = torch.stack(source_indices, dim=0).to(device)  # (B, S)
     src_base = src_logits.masked_fill(~ownership_mask.unsqueeze(1), fill_val)  # (B, S, N)
+    # Per-batch has_ships: 0-ship planets are ineligible even before used_mask
+    has_ships_batch = torch.zeros(B, N, dtype=torch.bool, device=device)
+    for b in range(B):
+        for pi, cnt in all_planet_ships[b].items():
+            if cnt > 0:
+                has_ships_batch[b, pi] = True
+    src_base = src_base.masked_fill(~has_ships_batch.unsqueeze(1), fill_val)
 
     # ── 1. Source logprob & entropy — per-slot with sequential used mask ──
     src_lps = torch.zeros(B, device=device)
@@ -563,8 +649,8 @@ def logprob_batched_combined(
             for prev_s in range(s):
                 used_mask[src_idx_batch[b, prev_s]] = True
 
-            # ── All sources used → stop (matches sampling behaviour) ──
-            owned_avail = (ownership_mask[b] & ~used_mask).sum().item()
+            # ── All sources with ships available → stop ──
+            owned_avail = (ownership_mask[b] & has_ships_batch[b] & ~used_mask).sum().item()
             if owned_avail == 0:
                 break
 
@@ -579,7 +665,8 @@ def logprob_batched_combined(
             rem = remaining.get(si, 0)
             if rem <= 0:
                 continue
-            source_count[b] += 1
+
+            committed = False  # track whether this source had ≥1 successful launch
 
             if planets is not None:
                 src_p = planets[si]
@@ -588,22 +675,21 @@ def logprob_batched_combined(
 
             for ll in range(L):
                 tc = int(tgt_cats[s, ll].item())
-                tgt_lps[b] += all_logp[b, s, tc]
-                tgt_ents[b] += all_ent[b, s]
+                if tc < 0:
+                    continue      # sun-blocked → skip, no lp
                 if tc == 0:
+                    tgt_lps[b] += all_logp[b, s, tc]
+                    tgt_ents[b] += all_ent[b, s]
                     break
                 ti = valid[tc - 1]
                 fl = frac_logits_all[b, s, ti].nan_to_num(0.0)
                 flp = fl.log_softmax(dim=-1).nan_to_num(0.0)
                 fi = int(frac_idxs[s, ll].item())
-                frac_lps[b] += flp[fi]
-                safe_flp = flp.masked_fill(flp == fill_val, 0.0)
-                frac_ents[b] -= (safe_flp.exp() * safe_flp).sum()
                 _f = ship_fractions[fi]
                 ships = max(1, min(int(rem * _f), rem))
 
-                # Sun collision guard — use intercept angle + future
-                # target position, matching ``decode()`` exactly.
+                # Sun collision guard — uses real chosen ships for speed.
+                # Blocked → skip silently (no lp, no ship consumption).
                 if planets is not None and src_p is not None:
                     tgt_p = planets[ti]
                     speed = _fleet_speed(ships)
@@ -619,9 +705,20 @@ def logprob_batched_combined(
                         step=_st,
                         return_pos=True,
                     )
-                    if trajectory_hits_sun(src_p.x, src_p.y, angle=int_angle,
-                                            tgt_x=fut_x, tgt_y=fut_y):
-                        continue  # no ship consumption
+                    if trajectory_blocked(src_p.x, src_p.y, angle=int_angle,
+                                            tgt_x=fut_x, tgt_y=fut_y,
+                                            src_radius=src_p.radius):
+                        continue  # no lp, no consumption
+
+                # ── Commit: only after sun check passes ──
+                if not committed:
+                    source_count[b] += 1
+                    committed = True
+                tgt_lps[b] += all_logp[b, s, tc]
+                tgt_ents[b] += all_ent[b, s]
+                frac_lps[b] += flp[fi]
+                safe_flp = flp.masked_fill(flp == fill_val, 0.0)
+                frac_ents[b] -= (safe_flp.exp() * safe_flp).sum()
 
                 rem -= ships
                 if rem <= 0:

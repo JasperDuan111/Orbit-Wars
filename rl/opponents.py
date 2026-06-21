@@ -219,6 +219,7 @@ class OpponentPool:
         self.game_config = game_config or DEFAULT_CONFIG.game
         self._snapshots = []
         self._policy_instances = []
+        self._static_opponents = []   # loaded via load_checkpoint, always in the rule mix
 
     def add(self, state_dict):
         cpu_dict = {key: value.cpu() for key, value in state_dict.items()}
@@ -231,6 +232,26 @@ class OpponentPool:
             self._snapshots.pop(0)
             old = self._policy_instances.pop(0)
             del old
+
+    def load_checkpoint(self, path: str):
+        """Load a .pt checkpoint and add it to the static opponent lineup.
+
+        Static opponents are always mixed into the rule-based branch of
+        ``sample()``, so they act like persistent scripted foes rather
+        than transient self-play snapshots.
+        """
+        ckpt = torch.load(path, map_location="cpu", weights_only=True)
+        state_dict = ckpt.get("policy_state_dict", ckpt)
+        policy = self.policy_factory().to(self.device)
+        policy.load_state_dict(state_dict)
+        policy.eval()
+        self._static_opponents.append(PolicyOpponent(
+            policy,
+            device=self.device,
+            action_config=self.action_config,
+            obs_config=self.obs_config,
+            game_config=self.game_config,
+        ))
 
     def restore_snapshots(self, snapshots):
         """Restore pool from a list of CPU state dicts (e.g. from checkpoint)."""
@@ -246,6 +267,9 @@ class OpponentPool:
     @property
     def snapshots(self):
         return self._snapshots
+
+    def __len__(self):
+        return len(self._policy_instances)
 
     def sample(self, only_economy, rule_prob: float = 0.0):
         """Sample an opponent.
@@ -263,13 +287,15 @@ class OpponentPool:
                 RandomOpponent(),
             ])
 
+        rule_pool = [
+            NearestPlanetOpponent(),
+            DoNothingOpponent(),
+            RandomOpponent(),
+            RuleBasedStarter(),
+        ] + self._static_opponents
+
         if not self._policy_instances or (rule_prob > 0 and random.random() < rule_prob):
-            return random.choice([
-                NearestPlanetOpponent(),
-                DoNothingOpponent(),
-                RandomOpponent(),                
-                RuleBasedStarter(),
-            ])
+            return random.choice(rule_pool)
 
         policy = random.choice(self._policy_instances)
         return PolicyOpponent(

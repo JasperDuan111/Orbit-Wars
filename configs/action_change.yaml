@@ -43,10 +43,11 @@ reward:
   planet_count_scale: 0.03          # +0.03 per extra planet owned per step (was 0.02)
   territory_scale: 0.5              # base reward per capture / loss event
   production_weight: 0.5            # quality multiplier: 1 + prod × weight
-  neutral_capture_bonus: 2.0        # neutral capture = (1+2.0)× base = 3×
+  enemy_capture_bonus: 3.0          # enemy→me multiplier (hardest, biggest reward)
+  territory_loss_penalty: 2.0        # me→enemy penalty multiplier (worst loss)
   no_action_penalty_scale: 0.03     # penalty per idle step after grace (match economy scale)
   no_action_grace_steps: 5          # consecutive idle steps before penalty (was 20)
-  launch_bonus_scale: 0.01          # +0.01 per fleet launch — fills gap before capture reward
+  launch_bonus_scale: 5.0e-4     # +5e-4 per ship launched — dense signal bridging launch→capture gap
   terminal_win_scale: 5.0
   terminal_lose_scale: -5.0
   invalid_action_penalty: 0.1

@@ -100,7 +100,8 @@ class RewardCalculator:
         self.planet_count_scale: float = reward_config.planet_count_scale
         self.territory_scale: float = reward_config.territory_scale
         self.production_weight: float = reward_config.production_weight
-        self.neutral_capture_bonus: float = reward_config.neutral_capture_bonus
+        self.enemy_capture_bonus: float = reward_config.enemy_capture_bonus
+        self.territory_loss_penalty: float = reward_config.territory_loss_penalty
         self.no_action_penalty_scale: float = reward_config.no_action_penalty_scale
         self.launch_bonus_scale: float = reward_config.launch_bonus_scale
         self.terminal_win_scale: float = reward_config.terminal_win_scale
@@ -128,7 +129,7 @@ class RewardCalculator:
 
     def compute(
         self, obs, player_id: int, is_done: bool, update_cont: int,
-        launch_count: int = 0,
+        total_ships: int = 0,
     ) -> Tuple[float, float, float, float]:
         """Compute the per-step reward.
 
@@ -148,21 +149,21 @@ class RewardCalculator:
         reward = 0.0
         if self.only_economy:
             # ── Economy-only: learn to grow fleet & production ──
-            reward += self._launch_bonus(launch_count)
+            reward += self._launch_bonus(total_ships)
             reward += self._economy_fleet_advantage(my_total, enemy_total)
             reward += self._economy_production_advantage(obs, player_id)
             reward += self._wrong_action_penalty(out_of_boundary, suicide)
-            reward += self._no_action_penalty(launch_count)
+            reward += self._no_action_penalty(total_ships)
         else:
             # ── Combat: map control + territory events + terminal ──
-            reward += self._launch_bonus(launch_count)
+            reward += self._launch_bonus(total_ships)
             reward += self._economy_fleet_advantage(my_total, enemy_total)
             reward += self._planet_count_advantage(obs, player_id)
             reward += self._economy_production_advantage(obs, player_id)
             reward += self._territory_change(obs, player_id)
             reward += self._terminal_reward(diff, is_done)
             reward += self._wrong_action_penalty(out_of_boundary, suicide)
-            reward += self._no_action_penalty(launch_count)
+            reward += self._no_action_penalty(total_ships)
     
 
         # ── Persist ──
@@ -212,9 +213,10 @@ class RewardCalculator:
     def _territory_change(self, obs, player_id: int) -> float:
         """Reward planet-ownership transitions.
 
-        - Capturing a planet:   + quality × territory_scale
-        - Losing a planet:      − quality × territory_scale
-        - Neutral → me:  extra ×(1 + neutral_capture_bonus)
+        - Enemy  → me:  + quality × territory_scale × enemy_capture_bonus   (highest — requires mass)
+        - Neutral → me: + quality × territory_scale                          (baseline — free planets)
+        - Me → enemy:    − quality × territory_scale × territory_loss_penalty (larger loss penalty)
+        - Me → neutral:  − quality × territory_scale (small loss — may be strategic)
         """
         prev_owners = self._last_planet_owners
         if prev_owners is None:
@@ -230,25 +232,29 @@ class RewardCalculator:
 
             prod = planet_production(obs, pid)
             quality = 1.0 + prod * self.production_weight
+            base = quality * self.territory_scale
 
             if new_owner == player_id:
-                bonus = quality * self.territory_scale
-                if old_owner == -1:                      # neutral → me
-                    bonus *= (1.0 + self.neutral_capture_bonus)
-                reward += bonus
-            elif old_owner == player_id:                  # me → enemy / neutral
-                reward -= quality * self.territory_scale
+                if old_owner != -1:                      # enemy → me (hardest, biggest reward)
+                    reward += base * self.enemy_capture_bonus
+                else:                                     # neutral → me
+                    reward += base
+            elif old_owner == player_id:
+                if new_owner != -1:                      # me → enemy (worst loss)
+                    reward -= base * self.territory_loss_penalty
+                else:                                     # me → neutral
+                    reward -= base
 
         return reward
 
-    def _no_action_penalty(self, launch_count: int) -> float:
+    def _no_action_penalty(self, total_ships: int) -> float:
         """Penalise prolonged inaction — escalating.
 
         After *no_action_grace_steps* consecutive idle steps the penalty
         grows with idle duration, so the model cannot afford to sit still
         indefinitely.
         """
-        if launch_count > 0:
+        if total_ships > 0:
             self._idle_steps = 0
             return 0.0
         self._idle_steps += 1
@@ -257,13 +263,20 @@ class RewardCalculator:
         excess = self._idle_steps - self.no_action_grace_steps
         return -self.no_action_penalty_scale * (1.0 + 0.1 * excess)
 
-    def _launch_bonus(self, launch_count: int) -> float:
-        """Immediate positive signal per fleet launch.
+    def _launch_bonus(self, total_ships: int) -> float:
+        """Non-linear launch bonus that strongly penalises tiny fleets.
 
-        Fills the temporal gap between launching fleets and seeing
-        economic / territorial rewards, which may take tens of steps.
+        Below 20 ships the bonus drops quadratically — a 4-ship launch
+        earns almost nothing, a 10-ship launch earns 1/4 of normal.
+        Above 20 ships the bonus scales linearly to reward mass.
         """
-        return launch_count * self.launch_bonus_scale
+        if total_ships <= 0:
+            return 0.0
+        if total_ships < 20:
+            factor = (total_ships / 20.0) ** 2
+        else:
+            factor = 1.0
+        return total_ships * self.launch_bonus_scale * factor
 
     # 4 ── Terminal reward ─────────────────────────────────────────
     def _terminal_reward(self, diff: float, is_done: bool) -> float:

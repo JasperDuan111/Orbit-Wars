@@ -107,6 +107,11 @@ def main():
         type=int,
         default=config.action.max_launches_per_source,
     )
+    parser.add_argument(
+        "--load-opponents",
+        type=str, nargs="*", default=None,
+        help="Pre-load checkpoint .pt files into the opponent pool before training.",
+    )
     args = parser.parse_args()
 
     config.train.total_updates = args.total_updates
@@ -242,6 +247,13 @@ def main():
         else:
             policy.load_state_dict(ckpt)
             print("  Old-format checkpoint — only policy restored.  Starting at update 1")
+
+    # Pre-load opponents from checkpoint files
+    if args.load_opponents:
+        for path in args.load_opponents:
+            pool.load_checkpoint(path)
+            print(f"  Loaded static opponent from {path}")
+        print(f"  Static opponents: {len(pool._static_opponents)}")
 
     for env in envs:
         env.set_opponent(pool.sample(config.reward.only_economy, rule_prob=config.train.opponent_rule_prob))

@@ -184,7 +184,7 @@ class ActorCriticGNN(nn.Module):
         #      A single global bias competes against all target scores.
         #      The model can nudge it up/down through PPO, but because
         #      it lacks per-slot information it won't drown out targets.
-        self.stop_bias = nn.Parameter(torch.tensor(-3.0))
+        self.stop_bias = nn.Parameter(torch.tensor(-1.0))
 
         self.fraction_head = nn.Sequential(
             nn.Linear(self.hg * 2, self.hg),

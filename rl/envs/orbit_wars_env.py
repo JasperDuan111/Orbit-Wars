@@ -132,7 +132,7 @@ class OrbitWarsSelfPlayEnv:
         player_id = _get_field(obs, "player", 0)
         my_action = my_action_override if my_action_override is not None else []
         my_action = my_action or []
-        my_action, invalid_count, launch_count = self._sanitize_action(my_action, obs, player_id)
+        my_action, invalid_count, total_ships = self._sanitize_action(my_action, obs, player_id)
 
         actions: list[Any] = [None] * self.num_players
         actions[self.player_index] = my_action
@@ -154,7 +154,7 @@ class OrbitWarsSelfPlayEnv:
 
         obs = self._get_obs(self.player_index)
         my_total, enemy_total, diff, reward = self._compute_reward(
-            obs, player_id, update_count, launch_count)
+            obs, player_id, update_count, total_ships)
 
         info = {
             "my_total": my_total,
@@ -164,10 +164,10 @@ class OrbitWarsSelfPlayEnv:
         }
         return obs, reward, self._is_done(), info
 
-    def _compute_reward(self, obs, player_id, update_count, launch_count=0):
+    def _compute_reward(self, obs, player_id, update_count, total_ships=0):
         """Delegate to RewardCalculator."""
         return self._reward_calc.compute(obs, player_id, self._is_done(),
-                                         update_count, launch_count)
+                                         update_count, total_ships)
 
     def _get_obs(self, index):
         return self._env.state[index]["observation"]
@@ -211,4 +211,5 @@ class OrbitWarsSelfPlayEnv:
             used[from_id] = used.get(from_id, 0) + ships
             clean.append([from_id, float(angle), ships])
 
-        return clean, invalid_count, len(clean)
+        total_ships = sum(m[2] for m in clean)
+        return clean, invalid_count, total_ships

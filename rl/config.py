@@ -94,16 +94,17 @@ class RewardConfig:
     planet_count_scale: float = 0.03
 
     # ── Sparse events: planet capture / loss ──
-    territory_scale: float = 3.0              # base weight per capture / loss
+    territory_scale: float = 3.0              # base reward per capture / loss
     production_weight: float = 0.5            # quality multiplier: 1 + prod × weight
-    neutral_capture_bonus: float = 2.0        # extra multiplier for neutral captures (3× total)
+    enemy_capture_bonus: float = 3.0          # extra multiplier for enemy→me captures (vs neutral baseline)
+    territory_loss_penalty: float = 2.0        # extra multiplier for me→enemy losses (vs me→neutral baseline)
 
     # ── No-action penalty: applied when 0 launches in a step ──
     no_action_penalty_scale: float = 0.03   # penalty per idle step after grace
     no_action_grace_steps: int = 5          # consecutive idle steps before penalty
 
     # ── Launch bonus: immediate positive signal per launch ──
-    launch_bonus_scale: float = 0.03        # +0.03 per launch — breaks inaction trap
+    launch_bonus_scale: float = 5.0e-4      # +5e-4 per ship launched (not per-launch)
 
     # ── Terminal  (asymmetric) ──
     terminal_win_scale: float = 15.0
