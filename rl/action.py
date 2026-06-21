@@ -183,6 +183,7 @@ def compute_intercept_angle(
     fleet_speed: float,
     orbit_lookup: dict,
     angular_velocity: float,
+    src_radius: float = 0.0,
     return_pos: bool = False,
 ):
     """Compute firing angle to intercept a (possibly orbiting) target.
@@ -191,7 +192,12 @@ def compute_intercept_angle(
     position.  For rotating planets the **secant method** solves for the
     flight time ``t`` that satisfies::
 
-        distance(source, target_pos(θ₀ + ω·t)) - fleet_speed · t = 0
+        distance(source, target_pos(θ₀ + ω·t)) - src_radius - 0.1 - fleet_speed · t = 0
+
+    The ``− src_radius − 0.1`` term accounts for the engine's fleet
+    spawn point (planet surface + 0.1), which is closer to the target
+    than the planet center. Without this correction predicted arrival
+    times are 2–5 steps too late, causing systematic misses.
 
     The secant method converges superlinearly and is robust across all
     parameter ranges, unlike the previous fixed-point iteration which
@@ -221,11 +227,15 @@ def compute_intercept_angle(
         th = theta_0 + angular_velocity * t
         return (cx + r * math.cos(th), cy + r * math.sin(th))
 
-    # ── f(t) = distance(source, target(t)) - fleet_speed * t ──────
+    # ── f(t) = distance(center, target(t)) - fleet_speed · t - spawn_offset ──
+    #     Fleet spawns at planet_surface + 0.1 along the launch ray, so the
+    #     effective travel distance starts (src_radius + 0.1) shorter.
+    spawn_offset = src_radius + 0.1
+
     def _f(t: float):
         tx, ty = _target_pos(t)
         d = math.hypot(ty - src_y, tx - src_x)
-        return d - fleet_speed * t
+        return d - fleet_speed * t - spawn_offset
 
     # Initial guess: straight-line flight time to the current position
     t_cur = math.hypot(tgt_y - src_y, tgt_x - src_x) / max(fleet_speed, 0.01)
@@ -234,7 +244,7 @@ def compute_intercept_angle(
     if f_cur <= 0:
         # Straight-line aim already reaches or overshoots — the minimal
         # positive root is between 0 and t_cur.  Bisect to find it.
-        t_lo, f_lo = 0.0, math.hypot(tgt_y - src_y, tgt_x - src_x)  # f(0) = distance
+        t_lo, f_lo = 0.0, _f(0.0)  # f(0) = distance - spawn_offset
         t_hi, f_hi = t_cur, f_cur
     else:
         # f(t_cur) > 0 — the planet "runs away".  Walk forward in steps
@@ -346,6 +356,7 @@ class ActionBuilder:
             fleet_speed=speed,
             orbit_lookup=orbit_lookup or {},
             angular_velocity=angular_velocity,
+            src_radius=src.radius,
             return_pos=True,
         )
 
@@ -602,6 +613,7 @@ def sample_action_discrete(
                     fleet_speed=speed,
                     orbit_lookup=orbit_lookup or {},
                     angular_velocity=angular_velocity,
+                    src_radius=src_p.radius,
                     return_pos=True,
                 )
                 if trajectory_blocked(src_p.x, src_p.y, angle=int_angle,
@@ -763,6 +775,7 @@ def logprob_batched_combined(
                         fleet_speed=speed,
                         orbit_lookup=ol,
                         angular_velocity=_av,
+                        src_radius=src_p.radius,
                         return_pos=True,
                     )
                     if trajectory_blocked(src_p.x, src_p.y, angle=int_angle,
