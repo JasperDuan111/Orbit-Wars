@@ -34,21 +34,21 @@ model:
 
 
 reward:
-  fleet_advantage_scale: 2.0e-4      # economy: (my_fleets - enemy_fleets) per step
-  production_advantage_scale: 0.01   # economy: my_prod*log(my_prod) - enemy_prod*log(enemy_prod)
-  terminal_economy_scale: 0.1        # economy terminal: my_fleets / total_board_production
+  fleet_advantage_scale: 4.0e-4
+  production_advantage_scale: 0.0015
+  terminal_economy_scale: 0.1
   out_of_boundary_penalty_scale: 0.02
   suicide_penalty_scale: 0.05
-  planet_count_scale: 0.01          # +0.03 per extra planet owned per step (was 0.02)
-  territory_scale: 1.5              # base reward per capture / loss event
-  production_weight: 0.5            # quality multiplier: 1 + prod × weight
-  enemy_capture_bonus: 3.0          # enemy→me multiplier (hardest, biggest reward)
-  territory_loss_penalty: 2.0        # me→enemy penalty multiplier (worst loss)
-  no_action_penalty_scale: 0.03     # penalty per idle step after grace (match economy scale)
-  no_action_grace_steps: 30          # consecutive idle steps before penalty (was 20)
-  launch_bonus_scale: 5.0e-4     # +5e-4 per ship launched — dense signal bridging launch→capture gap
-  defense_success_scale: 0.005   # +0.005 per enemy ship destroyed while defending
-  fleet_arrival_scale: 0.005     # +0.005 per ship that reached enemy/neutral planet
+  planet_count_scale: 0.015
+  territory_scale: 2.0
+  production_weight: 0.5
+  enemy_capture_bonus: 3.0
+  territory_loss_penalty: 2.0
+  no_action_penalty_scale: 0.03
+  no_action_grace_steps: 30
+  launch_bonus_scale: 1.5e-3
+  defense_success_scale: 0.01
+  fleet_arrival_scale: 0.008
   terminal_win_scale: 50.0
   terminal_lose_scale: -50.0
   invalid_action_penalty: 0.1

@@ -314,36 +314,50 @@ def _allocate_ships_offset(
     offset: float,
     targets_with_ships: List[Tuple[int, int]],
 ) -> List[Tuple[int, int]]:
-    """Allocate ships to targets: each target gets ``target_ships + 1 + offset``.
+    """Allocate ships to targets proportionally (no per-source pruning).
 
-    Args:
-        source_ships: total available ships at the source planet.
-        offset: extra ships on top of ``target_ships + 1``.
-            offset = 0  → exactly ``target_ships + 1`` (barely enough).
-            offset = 5  → ``target_ships + 6`` (safe).
-            offset = 20 → ``target_ships + 21`` (overwhelming).
-        targets_with_ships: list of ``(target_idx, target_ships)``.
+    - Enemy (ts > 0): ``target_ships + 1 + offset``
+    - Neutral (ts = 0): ``max(5, offset + 1)``
 
-    Returns:
-        list of ``(target_idx, ships_to_send)``.  Leftover ships stay for defence.
+    Per-source pruning is deliberately omitted — multiple sources can
+    converge on the same target, and what matters is the *total* ships
+    arriving.  Final pruning by total happens in ``decode_all``.
     """
     if source_ships <= 0 or not targets_with_ships:
         return [(t[0], 0) for t in targets_with_ships]
 
-    needs = [ts + 1 + int(offset) for _, ts in targets_with_ships]
-    needs = [max(1, n) for n in needs]
+    n = len(targets_with_ships)
+    needs = [
+        max(3, int(offset) + 1) if ts == 0 else max(1, ts + 1 + int(offset))
+        for _, ts in targets_with_ships
+    ]
     total_need = sum(needs)
 
     if total_need <= source_ships:
         allocations = needs
     else:
-        # Proportional scaling when we don't have enough
-        allocations = [max(1, int(n * source_ships / total_need)) for n in needs]
-        leftover = source_ships - sum(allocations)
-        n = len(allocations)
+        # Floor-based proportional allocation — never exceeds source_ships
+        allocations = [int(n_need * source_ships / total_need) for n_need in needs]
+        # Raise zeros to 1 (but cap at source_ships — drop targets if necessary)
+        for i in range(n):
+            if allocations[i] == 0:
+                allocations[i] = 1
+        total = sum(allocations)
+        # Trim excess by dropping targets from the end (lowest priority)
+        while total > source_ships and n > 0:
+            n -= 1
+            if allocations[n] > 0:
+                total -= allocations[n]
+                allocations[n] = 0
+        # Distribute leftover safely
+        leftover = source_ships - total
         for i in range(leftover):
-            allocations[i % n] += 1
-        allocations = [min(a, needs[i]) for i, a in enumerate(allocations)]
+            if allocations[i % max(n, 1)] > 0:
+                allocations[i % max(n, 1)] += 1
+        # Cap each allocation at its need
+        for i in range(len(allocations)):
+            if allocations[i] > needs[i]:
+                allocations[i] = needs[i]
 
     return [(targets_with_ships[i][0], allocations[i]) for i in range(len(targets_with_ships))]
 
@@ -407,18 +421,22 @@ class ActionBuilder:
     def decode_all(self, planets, action_indices, source_indices,
                    valid_targets, offset_indices, offset_bins,
                    orbit_lookup=None, angular_velocity=0.0):
-        """Convert per-slot action indices into game moves using offset allocation.
+        """Two-phase decode: per-source allocation → per-target aggregation + prune.
 
-        For each source:
-        1. Look up its offset from offset_indices / offset_bins.
-        2. Collect all selected targets (until STOP / end-of-launches).
-        3. Allocate ships via ``_allocate_ships_offset(src_ships, offset, ...)``.
-        4. Decode each (source, target, ships) into a game move.
+        Phase 1 — each source allocates ships to its targets independently
+        (no per-source pruning, so multiple sources can converge).
+
+        Phase 2 — aggregate all allocations by target.  If the total ships
+        across all sources heading to a target is less than ``target_ships + 1``
+        (the bare minimum to flip it), drop all moves to that target.
+        Leftover ships stay on their source planets for defence.
         """
-        moves = []
         _S = source_indices.shape[0]
         n_slots = min(_S, self.max_sources)
         _ol = orbit_lookup or {}
+
+        # Phase 1 — collect all (src_idx, tgt_idx, ships) allocations
+        raw_allocations: List[Tuple[int, int, int]] = []  # (src, tgt, ships)
 
         for s in range(n_slots):
             src_idx = int(source_indices[s].item())
@@ -427,18 +445,16 @@ class ActionBuilder:
             if src_ships <= 0:
                 continue
 
-            # Per-source offset from index
             oi = int(offset_indices[s].item())
             offset_val = offset_bins[oi]
 
-            # Collect targets for this source
             selected_targets = []
             for ll in range(self.max_launches):
                 tgt_cat = int(action_indices[s, ll].item())
                 if tgt_cat < 0:
-                    continue       # sun-blocked → skip
+                    continue
                 if tgt_cat == 0:
-                    break          # STOP
+                    break
                 real_tgt = valid_targets[tgt_cat - 1]
                 tgt_p = planets[real_tgt]
                 selected_targets.append((real_tgt, tgt_p.ships))
@@ -446,17 +462,32 @@ class ActionBuilder:
             if not selected_targets:
                 continue
 
-            # Allocate ships by offset
             allocations = _allocate_ships_offset(src_ships, offset_val, selected_targets)
-
             for tgt_idx, ships in allocations:
-                if ships <= 0:
-                    continue
+                if ships > 0:
+                    raw_allocations.append((src_idx, tgt_idx, ships))
+
+        # Phase 2 — aggregate by target and prune
+        tgt_totals: Dict[int, List[Tuple[int, int]]] = {}  # tgt → [(src, ships), ...]
+
+        for src_idx, tgt_idx, ships in raw_allocations:
+            tgt_totals.setdefault(tgt_idx, []).append((src_idx, ships))
+
+        moves = []
+        for tgt_idx, contributions in tgt_totals.items():
+            tgt_p = planets[tgt_idx]
+            total_ships = sum(s for _, s in contributions)
+
+            if tgt_p.ships > 0 and total_ships < tgt_p.ships + 1:
+                # Not enough to flip this enemy planet — skip all moves
+                continue
+            # Neutral planet (ships=0): any amount is fine
+
+            for src_idx, ships in contributions:
                 move = self.decode(planets, src_idx, tgt_idx, ships,
                                    _ol, angular_velocity)
-                if move is None:
-                    continue
-                moves.append(move)
+                if move is not None:
+                    moves.append(move)
 
         return moves
 

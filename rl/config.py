@@ -79,43 +79,43 @@ class ModelConfig:
 class RewardConfig:
     # ── Economy mode: dense fleet advantage per step ──
     #     reward = (my_fleets - enemy_fleets) * scale
-    fleet_advantage_scale: float = 1e-4
+    fleet_advantage_scale: float = 4e-4
 
     # ── Economy mode: dense production advantage per step ──
     #     reward = (my_prod * log(my_prod) - enemy_prod * log(enemy_prod)) * scale
-    production_advantage_scale: float = 0.01
+    production_advantage_scale: float = 0.0015
 
     # ── Economy mode: terminal fleet efficiency ──
     #     reward = my_fleets / total_board_production * scale
     terminal_economy_scale: float = 0.1
 
-    out_of_boundary_penalty_scale: float = 5e-4
-    suicide_penalty_scale: float = 1e-3
+    out_of_boundary_penalty_scale: float = 0.02
+    suicide_penalty_scale: float = 0.05
 
     # ── Legacy dense: planet-count advantage per step ──
     #     reward = (my_planets − enemy_planets) × scale
-    planet_count_scale: float = 0.03
+    planet_count_scale: float = 0.015
 
     # ── Sparse events: planet capture / loss ──
-    territory_scale: float = 3.0              # base reward per capture / loss
+    territory_scale: float = 2.0              # base reward per capture / loss
     production_weight: float = 0.5            # quality multiplier: 1 + prod × weight
     enemy_capture_bonus: float = 3.0          # extra multiplier for enemy→me captures (vs neutral baseline)
     territory_loss_penalty: float = 2.0        # extra multiplier for me→enemy losses (vs me→neutral baseline)
 
     # ── No-action penalty: applied when 0 launches in a step ──
     no_action_penalty_scale: float = 0.03   # penalty per idle step after grace
-    no_action_grace_steps: int = 5          # consecutive idle steps before penalty
+    no_action_grace_steps: int = 30          # consecutive idle steps before penalty
 
     # ── Launch bonus: immediate positive signal per launch ──
-    launch_bonus_scale: float = 5.0e-4      # +5e-4 per ship launched (not per-launch)
+    launch_bonus_scale: float = 1.5e-3      # +1.5e-3 per ship launched
 
     # ── Fleet combat events: bridge launch → capture gap ──
-    defense_success_scale: float = 0.005    # +0.005 per enemy ship destroyed while defending own planet
-    fleet_arrival_scale: float = 0.005      # +0.005 per ship that reached enemy/neutral planet
+    defense_success_scale: float = 0.01     # +0.01 per enemy ship destroyed while defending own planet
+    fleet_arrival_scale: float = 0.008      # +0.008 per ship that reached enemy/neutral planet
 
     # ── Terminal  (asymmetric) ──
-    terminal_win_scale: float = 15.0
-    terminal_lose_scale: float = -15.0
+    terminal_win_scale: float = 50.0
+    terminal_lose_scale: float = -50.0
 
     # ── Invalid-action penalty (applied by env wrapper) ──
     invalid_action_penalty: float = 0.1
