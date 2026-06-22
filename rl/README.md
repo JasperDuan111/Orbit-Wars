@@ -27,7 +27,8 @@ pip install -U setuptools
 
 Train:
 ```bash
-python -m rl.train --config configs/default.yaml --device cuda --resume checkpoints/ppo_orbit_wars_150.pt
+python -m rl.train --config configs/default.yaml --load-opponents checkpoints/old_mlp_200.pt:configs/mlp_config.yaml checkpoints/old_gnn_500.pt:configs/gnn_config.yaml
+
 ```
 
 TensorBoard:
