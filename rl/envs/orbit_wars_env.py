@@ -132,7 +132,7 @@ class OrbitWarsSelfPlayEnv:
         player_id = _get_field(obs, "player", 0)
         my_action = my_action_override if my_action_override is not None else []
         my_action = my_action or []
-        my_action, invalid_count, total_ships = self._sanitize_action(my_action, obs, player_id)
+        my_action, invalid_count, total_ships, per_launch = self._sanitize_action(my_action, obs, player_id)
 
         actions: list[Any] = [None] * self.num_players
         actions[self.player_index] = my_action
@@ -154,7 +154,7 @@ class OrbitWarsSelfPlayEnv:
 
         obs = self._get_obs(self.player_index)
         my_total, enemy_total, diff, reward = self._compute_reward(
-            obs, player_id, update_count, total_ships)
+            obs, player_id, update_count, total_ships, per_launch)
 
         info = {
             "my_total": my_total,
@@ -164,10 +164,10 @@ class OrbitWarsSelfPlayEnv:
         }
         return obs, reward, self._is_done(), info
 
-    def _compute_reward(self, obs, player_id, update_count, total_ships=0):
+    def _compute_reward(self, obs, player_id, update_count, total_ships=0, per_launch=None):
         """Delegate to RewardCalculator."""
         return self._reward_calc.compute(obs, player_id, self._is_done(),
-                                         update_count, total_ships)
+                                         update_count, total_ships, per_launch)
 
     def _get_obs(self, index):
         return self._env.state[index]["observation"]
@@ -179,9 +179,9 @@ class OrbitWarsSelfPlayEnv:
 
     def _sanitize_action(self, action, obs, player_id):
         if not action:
-            return [], 0, 0
+            return [], 0, 0, []
         if not isinstance(action, list):
-            return [], len(action) if hasattr(action, '__len__') else 1, 0
+            return [], len(action) if hasattr(action, '__len__') else 1, 0, []
 
         raw_planets = obs.get("planets", []) if isinstance(obs, dict) else obs.planets
         planets = [Planet(*p) for p in raw_planets]
@@ -212,4 +212,5 @@ class OrbitWarsSelfPlayEnv:
             clean.append([from_id, float(angle), ships])
 
         total_ships = sum(m[2] for m in clean)
-        return clean, invalid_count, total_ships
+        per_launch = [m[2] for m in clean]
+        return clean, invalid_count, total_ships, per_launch

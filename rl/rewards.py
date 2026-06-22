@@ -132,6 +132,7 @@ class RewardCalculator:
     def compute(
         self, obs, player_id: int, is_done: bool, update_cont: int,
         total_ships: int = 0,
+        per_launch: list = None,
     ) -> Tuple[float, float, float, float]:
         """Compute the per-step reward.
 
@@ -153,14 +154,14 @@ class RewardCalculator:
         reward = 0.0
         if self.only_economy:
             # ── Economy-only: learn to grow fleet & production ──
-            reward += self._launch_bonus(total_ships)
+            reward += self._launch_bonus(total_ships, per_launch)
             reward += self._economy_fleet_advantage(my_total, enemy_total)
             reward += self._economy_production_advantage(obs, player_id)
             reward += self._wrong_action_penalty(out_of_boundary, suicide)
             reward += self._no_action_penalty(total_ships)
         else:
             # ── Combat: map control + territory events + terminal ──
-            reward += self._launch_bonus(obs, total_ships)
+            reward += self._launch_bonus(total_ships, per_launch)
             reward += self._economy_fleet_advantage(my_total, enemy_total)
             reward += self._planet_count_advantage(obs, player_id)
             reward += self._economy_production_advantage(obs, player_id)
@@ -269,25 +270,30 @@ class RewardCalculator:
         excess = self._idle_steps - self.no_action_grace_steps
         return -self.no_action_penalty_scale * (1.0 + 0.1 * excess)
 
-    def _launch_bonus(self, obs, total_ships: int) -> float:
-        """Per-ship launch bonus with a minimum-ships gate.
+    def _launch_bonus(self, total_ships: int, per_launch: list = None) -> float:
+        """Per-launch reward: reward large fleets, penalise tiny ones.
 
-        Fleets smaller than 10 ships earn nothing — this discourages the
-        "many tiny launches" degenerate strategy where the model fires
-        2–4 ship fleets that arrive but lose every combat.
+        Each launch is scored independently — a 40-ship fleet earns well
+        (+0.02) while a 3-ship fleet is penalised (−0.02).  This closes
+        the loophole where several small launches hide behind one big one.
 
         Not-launching (0 ships) is NOT penalised here — ``_no_action_penalty``
         handles prolonged inaction with its own grace + escalating mechanism.
-        The penalty gradient for 1–9 ships is deliberately mild so the model
-        can occasionally risk a small fleet without catastrophic punishment.
         """
-        if total_ships == 0:
-            return 0.0                      # idle penalty handles this
-        if obs["step"] <= 50 and total_ships < 10:
-            return -0.05                    # early game: gentle nudge
-        if total_ships < 10:
-            return -5.0 + 4.5 * (total_ships - 1) / 8.0
-        return total_ships * self.launch_bonus_scale
+        if per_launch is None:
+            per_launch = [total_ships] if total_ships > 0 else []
+        if not per_launch:
+            return 0.0
+
+        reward = 0.0
+        for ships in per_launch:
+            if ships >= 10:
+                reward += ships * self.launch_bonus_scale
+            else:
+                # small launch penalty: 1船=-0.015, 2船=-0.01, 3船=-0.005, 4船=0
+                # continuous with launch_bonus_scale at ships=5
+                reward += -0.02 + 0.005 * ships
+        return reward
 
     def _defense_success(self, defense_ships: int) -> float:
         """Reward for destroying enemy ships while defending own planets.
