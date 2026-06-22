@@ -8,9 +8,9 @@ import torch
 from kaggle_environments.envs.orbit_wars.orbit_wars import CENTER, Planet, ROTATION_RADIUS_LIMIT
 from .action import (ActionBuilder, sample_action_discrete,
                         build_orbit_lookup)
-from .config import ActionSpaceConfig, DEFAULT_CONFIG, GameConfig, ObsConfig
+from .config import ActionSpaceConfig, DEFAULT_CONFIG, GameConfig, ObsConfig, OrbitWarsConfig
 from .obs import encode_observation
-from .models import ActorCritic
+from .models import ActorCritic, ActorCriticGNN
 
 
 def _get_field(obs, name, default=None):
@@ -139,11 +139,16 @@ class PolicyOpponent:
     @staticmethod
     def batch_act(opponents_with_obs, device, action_config=None, obs_config=None,
                   game_config=None, episode_steps=500):
-        """Batch inference for multiple PolicyOpponents on GPU."""
-        action_config = action_config or DEFAULT_CONFIG.action
-        obs_config = obs_config or DEFAULT_CONFIG.obs
-        game_config = game_config or DEFAULT_CONFIG.game
-        max_launches = action_config.max_launches_per_source
+        """Batch inference for multiple PolicyOpponents on GPU.
+
+        Opponents that share the same policy instance are batched together
+        for a single forward pass.  Decoding uses each opponent's own
+        action/obs config so heterogeneous pre-loaded opponents work correctly.
+        """
+        # Fallback configs (used only when an opponent lacks its own)
+        _fallback_action = action_config or DEFAULT_CONFIG.action
+        _fallback_obs = obs_config or DEFAULT_CONFIG.obs
+        _fallback_game = game_config or DEFAULT_CONFIG.game
 
         groups = defaultdict(list)
         for idx, (opponent, _obs) in enumerate(opponents_with_obs):
@@ -154,13 +159,18 @@ class PolicyOpponent:
         for _policy_id, indices in groups.items():
             first = opponents_with_obs[indices[0]][0]
             policy = first.policy
+            # Use the first opponent's obs/game config for encoding — all
+            # opponents in this group share the same policy and therefore the
+            # same observation space.
+            enc_obs_cfg = first.obs_config or _fallback_obs
+            enc_game_cfg = first.game_config or _fallback_game
 
             obs_vectors, raw_obs_list = [], []
             for idx in indices:
                 _, obs = opponents_with_obs[idx]
                 raw_obs_list.append(obs)
                 obs_vec = encode_observation(
-                    obs, obs_config=obs_config, game_config=game_config,
+                    obs, obs_config=enc_obs_cfg, game_config=enc_game_cfg,
                     episode_steps=episode_steps,
                 )
                 obs_vectors.append(obs_vec)
@@ -170,8 +180,11 @@ class PolicyOpponent:
                 sg_b, tgt_b, stop_b, frac_b, _, omask_b = policy(obs_tensor)
 
             for i, idx in enumerate(indices):
-                _, obs = opponents_with_obs[idx]
-                pbi, my_i, non_i, player_id = first._action_builder.get_planet_data(obs)
+                opponent, obs = opponents_with_obs[idx]
+                # Each opponent uses its OWN configs for decoding
+                act_cfg = opponent.action_config or _fallback_action
+
+                pbi, my_i, non_i, player_id = opponent._action_builder.get_planet_data(obs)
                 planet_ships_dict = {
                     pi: pbi[pi].ships
                     for pi in my_i if pbi[pi].owner == player_id
@@ -185,12 +198,12 @@ class PolicyOpponent:
                     target_scores=tgt_b[i], stop_logits=stop_b[i],
                     frac_logits_all=frac_b[i],
                     valid_targets=non_i, planet_ships=planet_ships_dict,
-                    max_launches=max_launches,
-                    deterministic=True, ship_fractions=action_config.ship_fractions,
+                    max_launches=act_cfg.max_launches_per_source,
+                    deterministic=True, ship_fractions=act_cfg.ship_fractions,
                     planets=pbi,
                     orbit_lookup=ol, angular_velocity=av,
                 )
-                results[idx] = first._action_builder.decode_all(
+                results[idx] = opponent._action_builder.decode_all(
                     pbi, acts, src_i, planet_ships_dict, non_i,
                     orbit_lookup=ol, angular_velocity=av)
 
@@ -229,25 +242,62 @@ class OpponentPool:
             old = self._policy_instances.pop(0)
             del old
 
-    def load_checkpoint(self, path: str):
+    @staticmethod
+    def _build_model_for_config(config: "OrbitWarsConfig"):
+        """Build a fresh model from *config* (can differ from the pool's factory)."""
+        if config.model.model_type == "gnn":
+            return ActorCriticGNN(
+                obs_config=config.obs,
+                actions_per_source=config.action.actions_per_source,
+                max_sources=config.action.max_sources,
+                n_fractions=len(config.action.ship_fractions),
+                model_config=config.model,
+            )
+        else:
+            return ActorCritic(
+                config.obs.obs_dim,
+                config.action.actions_per_source,
+                config.action.max_sources,
+                model_config=config.model,
+            )
+
+    def load_checkpoint(self, path: str, config: "OrbitWarsConfig | None" = None):
         """Load a .pt checkpoint and add it to the static opponent lineup.
 
         Static opponents are always mixed into the rule-based branch of
         ``sample()``, so they act like persistent scripted foes rather
         than transient self-play snapshots.
+
+        If *config* is given, the model is built from that config (model type,
+        action space, etc.), allowing opponents trained with a different
+        architecture to be loaded.  If ``None``, the pool's default factory
+        and configs are used (backward-compatible).
         """
         ckpt = torch.load(path, map_location="cpu", weights_only=True)
         state_dict = ckpt.get("policy_state_dict", ckpt)
-        policy = self.policy_factory().to(self.device)
-        policy.load_state_dict(state_dict)
-        policy.eval()
-        self._static_opponents.append(PolicyOpponent(
-            policy,
-            device=self.device,
-            action_config=self.action_config,
-            obs_config=self.obs_config,
-            game_config=self.game_config,
-        ))
+
+        if config is not None:
+            policy = self._build_model_for_config(config).to(self.device)
+            policy.load_state_dict(state_dict)
+            policy.eval()
+            self._static_opponents.append(PolicyOpponent(
+                policy,
+                device=self.device,
+                action_config=config.action,
+                obs_config=config.obs,
+                game_config=config.game,
+            ))
+        else:
+            policy = self.policy_factory().to(self.device)
+            policy.load_state_dict(state_dict)
+            policy.eval()
+            self._static_opponents.append(PolicyOpponent(
+                policy,
+                device=self.device,
+                action_config=self.action_config,
+                obs_config=self.obs_config,
+                game_config=self.game_config,
+            ))
 
     def restore_snapshots(self, snapshots):
         """Restore pool from a list of CPU state dicts (e.g. from checkpoint)."""

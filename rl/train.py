@@ -110,7 +110,12 @@ def main():
     parser.add_argument(
         "--load-opponents",
         type=str, nargs="*", default=None,
-        help="Pre-load checkpoint .pt files into the opponent pool before training.",
+        help=(
+            "Pre-load checkpoint .pt files into the opponent pool before training. "
+            "Each entry can be a bare path (uses the main --config) or "
+            "\"path.pt:config.yaml\" to use a different config for that opponent "
+            "(different model architecture, action space, etc.)."
+        ),
     )
     args = parser.parse_args()
 
@@ -250,9 +255,16 @@ def main():
 
     # Pre-load opponents from checkpoint files
     if args.load_opponents:
-        for path in args.load_opponents:
-            pool.load_checkpoint(path)
-            print(f"  Loaded static opponent from {path}")
+        for entry in args.load_opponents:
+            # Support "path.pt" (use main config) or "path.pt:config.yaml" (per-opponent config)
+            if ":" in entry:
+                ckpt_path, config_path = entry.split(":", 1)
+                opp_config = OrbitWarsConfig.from_yaml(config_path)
+                pool.load_checkpoint(ckpt_path, config=opp_config)
+                print(f"  Loaded static opponent from {ckpt_path} (config: {config_path})")
+            else:
+                pool.load_checkpoint(entry)
+                print(f"  Loaded static opponent from {entry}")
         print(f"  Static opponents: {len(pool._static_opponents)}")
 
     for env in envs:

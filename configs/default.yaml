@@ -16,9 +16,9 @@ obs:
   global_features: 9
 
 action:
-  max_sources: 5
-  max_targets: 10
-  ship_fractions: [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]
+  max_sources: 20
+  max_targets: 20
+  ship_fractions: [0.25, 0.5, 0.75, 1.0]
   ship_intercepts: [0, 1, 2, 3, 4]
   max_launches_per_source: 2
   epsilon: 0.0                  # ε-greedy exploration (0 = pure argmax, 1 = pure random)
@@ -27,27 +27,31 @@ model:
   model_type: "gnn"       # "mlp" (baseline) or "gnn" (GNN+Attention)
   hidden_sizes: [512, 512, 256]  # only used by mlp model
   dropout: 0.1
-  gnn:                          # GNN+Attention model hyperparameters
-    gcn_dims: [256, 128, 128]        # GCN output dims per layer (list length = number of layers)
-    fleet_attn_dims: [512, 256, 128]      # Fleet self-attention projection dims
-    cross_attn_dims: [512, 256, 128]       # Cross-attention projection dims
+  gnn:
+    gcn_dims: [512, 384, 256]
+    fleet_attn_dims: [512, 256, 128]
+    cross_attn_dims: [512, 384, 256]
+
+
 
 reward:
   fleet_advantage_scale: 2.0e-4      # economy: (my_fleets - enemy_fleets) per step
   production_advantage_scale: 0.01   # economy: my_prod*log(my_prod) - enemy_prod*log(enemy_prod)
   terminal_economy_scale: 0.1        # economy terminal: my_fleets / total_board_production
-  out_of_boundary_penalty_scale: 0.03
+  out_of_boundary_penalty_scale: 0.02
   suicide_penalty_scale: 0.05
-  planet_count_scale: 0.03          # +0.03 per extra planet owned per step (was 0.02)
-  territory_scale: 0.5              # base reward per capture / loss event
+  planet_count_scale: 0.01          # +0.03 per extra planet owned per step (was 0.02)
+  territory_scale: 1.5              # base reward per capture / loss event
   production_weight: 0.5            # quality multiplier: 1 + prod × weight
   enemy_capture_bonus: 3.0          # enemy→me multiplier (hardest, biggest reward)
   territory_loss_penalty: 2.0        # me→enemy penalty multiplier (worst loss)
   no_action_penalty_scale: 0.03     # penalty per idle step after grace (match economy scale)
-  no_action_grace_steps: 5          # consecutive idle steps before penalty (was 20)
+  no_action_grace_steps: 30          # consecutive idle steps before penalty (was 20)
   launch_bonus_scale: 5.0e-4     # +5e-4 per ship launched — dense signal bridging launch→capture gap
-  terminal_win_scale: 5.0
-  terminal_lose_scale: -5.0
+  defense_success_scale: 0.005   # +0.005 per enemy ship destroyed while defending
+  fleet_arrival_scale: 0.005     # +0.005 per ship that reached enemy/neutral planet
+  terminal_win_scale: 50.0
+  terminal_lose_scale: -50.0
   invalid_action_penalty: 0.1
   only_economy: false
 
@@ -71,14 +75,14 @@ train:
   gae_lambda: 0.95
 
   # ── PPO clipping ──
-  clip_range: 0.2                # wider clip — allows bigger policy updates (was 0.2)
-
+  clip_range: 0.2
+  
   # ── Optimisation ──
   learning_rate: 2.0e-4
   max_grad_norm: 0.5
 
   # ── Loss weights ──
-  ent_coef: 0.005
+  ent_coef: 0.01
   vf_coef: 1.0
   value_reg: 0.0001                # L2 penalty on value output — prevents collapse to constant
 
@@ -87,7 +91,7 @@ train:
   epochs: 3
 
   # ── Checkpoint & opponent ──
-  save_every: 50                 # faster opponent-pool refresh (was 50)
+  save_every: 20                 # faster opponent-pool refresh (was 50)
   opponent_refresh: 5            # more frequent opponent rotation (was 5)
   opponent_pool_capacity: 10
-  opponent_rule_prob: 0.3        # 30% chance of rule-based opponent (vs. policy opponent)
+  opponent_rule_prob: 0.5        # 30% chance of rule-based opponent (vs. policy opponent)

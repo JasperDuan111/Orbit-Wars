@@ -44,5 +44,5 @@ python -m rl.train --num-envs 8 --max-launches-per-source 6
 
 Test:
 ```bash
-python main.py --checkpoint checkpoints/ppo_orbit_wars_500.pt --render
+python main.py --player0 <> --player1 <> --config0 <> --config1 <>--render --seed <>
 ```
