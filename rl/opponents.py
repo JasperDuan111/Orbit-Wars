@@ -108,9 +108,9 @@ class PolicyOpponent:
         )
         obs_tensor = torch.from_numpy(obs_vector).float().unsqueeze(0).to(self.device)
         with torch.no_grad():
-            sg, tgt, stop, frac, _, omask = self.policy(obs_tensor)
+            sg, tgt, stop, offset, _, omask = self.policy(obs_tensor)
             sg = sg.squeeze(0); tgt = tgt.squeeze(0); stop = stop.squeeze(0)
-            frac = frac.squeeze(0); omask = omask.squeeze(0)
+            offset = offset.squeeze(0); omask = omask.squeeze(0)
 
         planets, my_idx, non_my_idx, player_id = self._action_builder.get_planet_data(obs)
         planet_ships_dict = {
@@ -121,18 +121,19 @@ class PolicyOpponent:
         orbit_lookup = build_orbit_lookup(obs)
         angular_velocity = float(obs.get("angular_velocity", 0.0))
 
-        action_indices, src_indices, _, _ = sample_action_discrete(
+        action_indices, src_indices, offset_idx, _, _ = sample_action_discrete(
             source_logits=sg, ownership_mask=omask,
-            target_scores=tgt, stop_logits=stop, frac_logits_all=frac,
+            target_scores=tgt, stop_logits=stop, offset_logits=offset,
             valid_targets=non_my_idx, planet_ships=planet_ships_dict,
             max_launches=self.action_config.max_launches_per_source,
-            deterministic=True, ship_fractions=self.action_config.ship_fractions,
+            deterministic=True, offset_bins=self.action_config.offset_bins,
             planets=planets,
             orbit_lookup=orbit_lookup,
             angular_velocity=angular_velocity,
         )
         return self._action_builder.decode_all(
-            planets, action_indices, src_indices, planet_ships_dict, non_my_idx,
+            planets, action_indices, src_indices, non_my_idx,
+            offset_indices=offset_idx, offset_bins=self.action_config.offset_bins,
             orbit_lookup=orbit_lookup,
             angular_velocity=angular_velocity)
 
@@ -177,7 +178,7 @@ class PolicyOpponent:
 
             obs_tensor = torch.from_numpy(np.stack(obs_vectors)).float().to(device)
             with torch.no_grad():
-                sg_b, tgt_b, stop_b, frac_b, _, omask_b = policy(obs_tensor)
+                sg_b, tgt_b, stop_b, offset_b, _, omask_b = policy(obs_tensor)
 
             for i, idx in enumerate(indices):
                 opponent, obs = opponents_with_obs[idx]
@@ -193,18 +194,19 @@ class PolicyOpponent:
                 ol = build_orbit_lookup(obs)
                 av = float(obs.get("angular_velocity", 0.0))
 
-                acts, src_i, _, _ = sample_action_discrete(
+                acts, src_i, offset_i, _, _ = sample_action_discrete(
                     source_logits=sg_b[i], ownership_mask=omask_b[i],
                     target_scores=tgt_b[i], stop_logits=stop_b[i],
-                    frac_logits_all=frac_b[i],
+                    offset_logits=offset_b[i],
                     valid_targets=non_i, planet_ships=planet_ships_dict,
                     max_launches=act_cfg.max_launches_per_source,
-                    deterministic=True, ship_fractions=act_cfg.ship_fractions,
+                    deterministic=True, offset_bins=act_cfg.offset_bins,
                     planets=pbi,
                     orbit_lookup=ol, angular_velocity=av,
                 )
                 results[idx] = opponent._action_builder.decode_all(
-                    pbi, acts, src_i, planet_ships_dict, non_i,
+                    pbi, acts, src_i, non_i,
+                    offset_indices=offset_i, offset_bins=act_cfg.offset_bins,
                     orbit_lookup=ol, angular_velocity=av)
 
         return results
@@ -250,7 +252,7 @@ class OpponentPool:
                 obs_config=config.obs,
                 actions_per_source=config.action.actions_per_source,
                 max_sources=config.action.max_sources,
-                n_fractions=len(config.action.ship_fractions),
+                n_offsets=config.action.n_offsets,
                 model_config=config.model,
             )
         else:

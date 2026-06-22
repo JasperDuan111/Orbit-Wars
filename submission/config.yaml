@@ -16,11 +16,11 @@ obs:
   global_features: 9
 
 action:
-  max_sources: 20
+  max_sources: 12
   max_targets: 20
   offset_bins: [0, 3, 5, 10, 20]
-  max_launches_per_source: 2
-  epsilon: 0.0                  # ε-greedy exploration (0 = pure argmax, 1 = pure random)
+  max_launches_per_source: 3
+  epsilon: 0.0
 
 model:
   model_type: "gnn"       # "mlp" (baseline) or "gnn" (GNN+Attention)

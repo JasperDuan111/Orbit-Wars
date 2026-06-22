@@ -1,0 +1,7 @@
+# Ignore the model checkpoint — user copies it manually before submitting
+model.pt
+*.pt
+
+# Submission archive
+submission.tar.gz
+*.tar.gz

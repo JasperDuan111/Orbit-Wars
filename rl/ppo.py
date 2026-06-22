@@ -15,7 +15,11 @@ class RolloutBuffer:
         self.device = device
         self.obs = torch.zeros((rollout_steps, num_envs, obs_dim), device=device)
         self.actions = torch.zeros(
-            (rollout_steps, num_envs, max_sources, max_launches, 2),
+            (rollout_steps, num_envs, max_sources, max_launches),
+            dtype=torch.long, device=device,
+        )
+        self.offset_indices = torch.zeros(
+            (rollout_steps, num_envs, max_sources),
             dtype=torch.long, device=device,
         )
         self.logprobs = torch.zeros((rollout_steps, num_envs), device=device)
@@ -29,6 +33,7 @@ class RolloutBuffer:
         self.planet_ships = [[None for _ in range(num_envs)] for _ in range(rollout_steps)]
         self.source_ships = [[None for _ in range(num_envs)] for _ in range(rollout_steps)]
         self.source_indices = [[None for _ in range(num_envs)] for _ in range(rollout_steps)]
+        self.offset_idx_list = [[None for _ in range(num_envs)] for _ in range(rollout_steps)]
         self.planets = [[None for _ in range(num_envs)] for _ in range(rollout_steps)]
         self.orbit_lookups = [[None for _ in range(num_envs)] for _ in range(rollout_steps)]
         self.ang_vels = [[0.0 for _ in range(num_envs)] for _ in range(rollout_steps)]
@@ -36,6 +41,7 @@ class RolloutBuffer:
 
     def add_batch(self, obs, raw_obs, actions, logprobs, rewards, dones, values,
                   valid_targets_list=None, source_ships_list=None, source_indices_list=None,
+                  offset_indices_list=None,
                   planet_ships_list=None, planets_list=None,
                   orbit_lookups_list=None, ang_vels_list=None):
         self.obs[self.pos].copy_(obs)
@@ -49,6 +55,7 @@ class RolloutBuffer:
             if valid_targets_list is not None: self.valid_targets[self.pos][i] = valid_targets_list[i]
             if source_ships_list is not None: self.source_ships[self.pos][i] = source_ships_list[i]
             if source_indices_list is not None: self.source_indices[self.pos][i] = source_indices_list[i]
+            if offset_indices_list is not None: self.offset_idx_list[self.pos][i] = offset_indices_list[i]
             if planet_ships_list is not None: self.planet_ships[self.pos][i] = planet_ships_list[i]
             if planets_list is not None: self.planets[self.pos][i] = planets_list[i]
             if orbit_lookups_list is not None: self.orbit_lookups[self.pos][i] = orbit_lookups_list[i]
@@ -74,6 +81,7 @@ class RolloutBuffer:
         indices = np.random.permutation(total)
         flat_obs = self.obs.reshape(total, -1)
         flat_act = self.actions.reshape(total, *self.actions.shape[2:])
+        flat_mi = self.offset_indices.reshape(total, *self.offset_indices.shape[2:])
         flat_lp = self.logprobs.reshape(total)
         flat_ret = self.returns.reshape(total)
         flat_adv = self.advantages.reshape(total)
@@ -81,6 +89,7 @@ class RolloutBuffer:
         flat_vt = [self.valid_targets[t][e] for t in range(self.rollout_steps) for e in range(self.num_envs)]
         flat_sh = [self.source_ships[t][e] for t in range(self.rollout_steps) for e in range(self.num_envs)]
         flat_si = [self.source_indices[t][e] for t in range(self.rollout_steps) for e in range(self.num_envs)]
+        flat_oidx = [self.offset_idx_list[t][e] for t in range(self.rollout_steps) for e in range(self.num_envs)]
         flat_ps = [self.planet_ships[t][e] for t in range(self.rollout_steps) for e in range(self.num_envs)]
         flat_pl = [self.planets[t][e] for t in range(self.rollout_steps) for e in range(self.num_envs)]
         flat_ol = [self.orbit_lookups[t][e] for t in range(self.rollout_steps) for e in range(self.num_envs)]
@@ -89,7 +98,8 @@ class RolloutBuffer:
             bi = indices[start:start + batch_size]
             yield bi, flat_obs[bi], flat_act[bi], flat_lp[bi], flat_ret[bi], flat_adv[bi], \
                 [flat_raw[i] for i in bi], [flat_vt[i] for i in bi], [flat_sh[i] for i in bi], \
-                [flat_si[i] for i in bi], [flat_ps[i] for i in bi], [flat_pl[i] for i in bi], \
+                [flat_si[i] for i in bi], [flat_oidx[i] for i in bi], \
+                [flat_ps[i] for i in bi], [flat_pl[i] for i in bi], \
                 [flat_ol[i] for i in bi], [flat_av[i] for i in bi]
 
     def clear(self): self.pos = 0
@@ -110,7 +120,7 @@ class PPOTrainer:
         self.device = device
         self.action_config = action_config or DEFAULT_CONFIG.action
         self.max_launches = self.action_config.max_launches_per_source
-        self.ship_fractions = self.action_config.ship_fractions
+        self.offset_bins = self.action_config.offset_bins
 
     def update(self, buffer):
         adv_flat = buffer.advantages.reshape(-1)
@@ -121,16 +131,17 @@ class PPOTrainer:
         updates = 0
 
         for _ in range(self.epochs):
-            for bi, obs, acts, old_lps, _, _, _, vt_list, sh_list, si_list, ps_list, pl_list, ol_list, av_list in buffer.get(self.batch_size):
-                src, tgt, stop, frac, val, om = self.policy(obs)
+            for bi, obs, acts, old_lps, _, _, _, vt_list, sh_list, si_list, oi_list, ps_list, pl_list, ol_list, av_list in buffer.get(self.batch_size):
+                src, tgt, stop, offset, val, om = self.policy(obs)
                 val = val.squeeze(-1)
 
                 new_lps, ents, scnt = logprob_batched_combined(
                     src_logits=src, tgt_scores=tgt, stop_logits=stop,
-                    frac_logits_all=frac, ownership_mask=om,
+                    offset_logits=offset, ownership_mask=om,
                     action_indices=acts, source_indices=si_list,
+                    offset_indices=oi_list,
                     all_valid_targets=vt_list, all_planet_ships=ps_list,
-                    max_launches=self.max_launches, ship_fractions=self.ship_fractions,
+                    max_launches=self.max_launches, offset_bins=self.offset_bins,
                     all_planets=pl_list,
                     all_orbit_lookups=ol_list,
                     all_ang_vels=av_list,

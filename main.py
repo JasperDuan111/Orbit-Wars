@@ -78,7 +78,7 @@ def _build_model(config: OrbitWarsConfig):
             obs_config=config.obs,
             actions_per_source=config.action.actions_per_source,
             max_sources=config.action.max_sources,
-            n_fractions=len(config.action.ship_fractions),
+            n_offsets=config.action.n_offsets,
             model_config=config.model,
         ).to(DEVICE)
     else:
@@ -117,9 +117,9 @@ def _policy_forward(obs, ctx: AgentContext):
     obs_tensor = torch.from_numpy(obs_vec).float().unsqueeze(0).to(DEVICE)
 
     with torch.no_grad():
-        sg, tgt, stop, frac, _, omask = ctx.model(obs_tensor)
+        sg, tgt, stop, offset, _, omask = ctx.model(obs_tensor)
     sg = sg.squeeze(0); tgt = tgt.squeeze(0); stop = stop.squeeze(0)
-    frac = frac.squeeze(0); omask = omask.squeeze(0)
+    offset = offset.squeeze(0); omask = omask.squeeze(0)
 
     planets, my_idx, non_my_idx, player_id = ctx.action_builder.get_planet_data(obs)
     planet_ships_dict = {
@@ -130,18 +130,19 @@ def _policy_forward(obs, ctx: AgentContext):
     orbit_lookup = build_orbit_lookup(obs)
     angular_velocity = float(obs.get("angular_velocity", 0.0))
 
-    action_indices, src_indices, _, _ = sample_action_discrete(
+    action_indices, src_indices, offset_idx, _, _ = sample_action_discrete(
         source_logits=sg, ownership_mask=omask,
-        target_scores=tgt, stop_logits=stop, frac_logits_all=frac,
+        target_scores=tgt, stop_logits=stop, offset_logits=offset,
         valid_targets=non_my_idx, planet_ships=planet_ships_dict,
         max_launches=ctx.max_launches, deterministic=True,
-        ship_fractions=config.action.ship_fractions,
+        offset_bins=config.action.offset_bins,
         planets=planets, orbit_lookup=orbit_lookup,
         angular_velocity=angular_velocity,
     )
 
     return ctx.action_builder.decode_all(
-        planets, action_indices, src_indices, planet_ships_dict, non_my_idx,
+        planets, action_indices, src_indices, non_my_idx,
+        offset_indices=offset_idx, offset_bins=config.action.offset_bins,
         orbit_lookup=orbit_lookup, angular_velocity=angular_velocity)
 
 

@@ -18,7 +18,8 @@ from .config import OrbitWarsConfig
 from .envs.orbit_wars_env import OrbitWarsSelfPlayEnv
 from .models import ActorCritic, ActorCriticGNN
 from .obs import encode_observation
-from .opponents import OpponentPool, NearestPlanetOpponent, PolicyOpponent
+from .opponents import (OpponentPool, NearestPlanetOpponent, PolicyOpponent,
+                           RandomOpponent, RuleBasedStarter, DoNothingOpponent)
 from .ppo import RolloutBuffer, PPOTrainer
 
 
@@ -28,6 +29,23 @@ def set_seed(seed):
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
+
+
+def _opponent_label(opp):
+    """One-line label for an opponent object (diag logging)."""
+    if isinstance(opp, PolicyOpponent):
+        cfg = opp.action_config
+        n_off = len(cfg.offset_bins) if cfg else "?"
+        return f"Policy(src={cfg.max_sources} tgt={cfg.max_targets} off={n_off})"
+    if isinstance(opp, NearestPlanetOpponent):
+        return "NearestPlanet"
+    if isinstance(opp, RandomOpponent):
+        return "Random"
+    if isinstance(opp, RuleBasedStarter):
+        return "Starter"
+    if isinstance(opp, DoNothingOpponent):
+        return "DoNothing"
+    return type(opp).__name__
 
 
 def _format_time(seconds: float) -> str:
@@ -182,7 +200,7 @@ def main():
             obs_config=config.obs,
             actions_per_source=config.action.actions_per_source,
             max_sources=config.action.max_sources,
-            n_fractions=len(config.action.ship_fractions),
+            n_offsets=config.action.n_offsets,
             model_config=config.model,
         ).to(device)
     else:
@@ -218,7 +236,7 @@ def main():
                 obs_config=config.obs,
                 actions_per_source=config.action.actions_per_source,
                 max_sources=config.action.max_sources,
-                n_fractions=len(config.action.ship_fractions),
+                n_offsets=config.action.n_offsets,
                 model_config=config.model,
             )
         else:
@@ -295,7 +313,7 @@ def main():
 
                 with torch.no_grad():
                     out = policy(obs_tensor)
-                    source_logits, target_scores, stop_logits, frac_logits_all, values_batch, ownership_masks = out
+                    source_logits, target_scores, stop_logits, offset_logits, values_batch, ownership_masks = out
                 values_batch = values_batch.squeeze(-1)
 
                 actions_batch = torch.zeros(
@@ -303,10 +321,13 @@ def main():
                         config.train.num_envs,
                         config.action.max_sources,
                         config.action.max_launches_per_source,
-                        2,
                     ),
                     dtype=torch.long,
                     device=device,
+                )
+                offset_indices_batch = torch.zeros(
+                    (config.train.num_envs, config.action.max_sources),
+                    dtype=torch.long, device=device,
                 )
                 logprobs_batch = torch.zeros((config.train.num_envs,), device=device)
 
@@ -346,6 +367,7 @@ def main():
                 valid_targets_snapshots = []
                 ships_snapshots = []
                 source_indices_snapshots = []
+                offset_indices_snapshots = []
                 planets_snapshots = []
                 orbit_snapshots = []
                 ang_vel_snapshots = []
@@ -362,35 +384,38 @@ def main():
                     angular_velocity = float(
                         _get_field(obs_list[i], "angular_velocity", 0.0))
 
-                    # 2. Per-slot action sampling: source → target → fraction
+                    # 2. Per-slot action sampling: source → offset → targets
                     #    Build {planet_idx: ships} for all owned planets
                     planet_ships_dict = {
                         idx: planets[idx].ships
                         for idx in my_idx if planets[idx].owner == player_id
                     }
-                    action_indices, src_indices, lp_val, _ = sample_action_discrete(
+                    action_indices, src_indices, offset_idx, lp_val, _ = sample_action_discrete(
                         source_logits=source_logits[i],
                         ownership_mask=ownership_masks[i],
                         target_scores=target_scores[i],
                         stop_logits=stop_logits[i],
-                        frac_logits_all=frac_logits_all[i],
+                        offset_logits=offset_logits[i],
                         valid_targets=non_my_idx,
                         planet_ships=planet_ships_dict,
                         max_launches=config.action.max_launches_per_source,
+                        offset_bins=config.action.offset_bins,
                         deterministic=False,
-                        ship_fractions=config.action.ship_fractions,
                         epsilon=config.action.epsilon,
                         planets=planets,
                         orbit_lookup=orbit_lookup,
                         angular_velocity=angular_velocity,
                     )
                     actions_batch[i] = action_indices
+                    offset_indices_batch[i] = offset_idx
                     logprobs_batch[i] = lp_val
 
                     # 3. Decode to moves (intercept angle + sun collision)
                     my_moves = action_builder.decode_all(
                         planets, action_indices,
-                        src_indices, planet_ships_dict, non_my_idx,
+                        src_indices, non_my_idx,
+                        offset_indices=offset_idx,
+                        offset_bins=config.action.offset_bins,
                         orbit_lookup=orbit_lookup,
                         angular_velocity=angular_velocity,
                     )
@@ -403,14 +428,15 @@ def main():
                         tgt_min = float(target_scores[0].min().item())
                         src_list = [int(src_indices[s].item()) for s in range(min(5, len(src_indices)))]
                         src_ships = {s: planet_ships_dict.get(s, 0) for s in src_list}
-                        tgt00 = int(action_indices[0, 0, 0].item())
-                        tgt01 = int(action_indices[0, 0, 1].item()) if action_indices.shape[2] > 1 else -1
+                        tgt00 = int(action_indices[0, 0].item())
+                        offset0 = float(config.action.offset_bins[int(offset_idx[0].item())])
                         obs_step = int(_get_field(obs_list[i], "step", 0))
+                        opp_labels = ", ".join(_opponent_label(o) for o in env._opponents)
                         print(f"[diag] upd={update} step={obs_step} pid={player_id} n_own={n_own} "
                               f"stop={stop_v:.2f} tgt_max={tgt_max:.2f} tgt_min={tgt_min:.2f} "
                               f"srcs={src_list} ships={src_ships} "
-                              f"tgt_cat0={tgt00} frac0={tgt01} "
-                              f"moves={len(my_moves)} lp={lp_val:.3f}")
+                              f"tgt0={tgt00} offset0={offset0:.0f} "
+                              f"moves={len(my_moves)} lp={lp_val:.3f} | opp=[{opp_labels}]")
 
                     orbit_snapshots.append(orbit_lookup)
                     ang_vel_snapshots.append(angular_velocity)
@@ -419,6 +445,7 @@ def main():
                     valid_targets_snapshots.append(non_my_idx)
                     ships_snapshots.append(planet_ships_dict)
                     source_indices_snapshots.append(src_indices)
+                    offset_indices_snapshots.append(offset_idx)
                     planets_snapshots.append(planets)
 
                     # 6. Step env
@@ -453,6 +480,7 @@ def main():
                     valid_targets_list=valid_targets_snapshots,
                     source_ships_list=ships_snapshots,
                     source_indices_list=source_indices_snapshots,
+                    offset_indices_list=offset_indices_snapshots,
                     planet_ships_list=ships_snapshots,
                     planets_list=planets_snapshots,
                     orbit_lookups_list=orbit_snapshots,
